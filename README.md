@@ -177,11 +177,12 @@ tools/          运维脚本
 ## 部署要点（如果你想复刻）
 
 1. **先装好 [qq-bridge](https://github.com/Derpyu520/qq-bridge)**，用本仓库 `bridge/` 覆盖它的 `src/`
-2. **预设**：把 `presets/qq-chat-v2.patch.yml` 装进 DSH 的 `qq-agent-presets`，`qq-tool-restrict.mjs` 放同目录
-3. **人格卡**：`persona/鲸鱼娘.template.md` 复制到 `roles/`，按你的群改写
-4. **路径**：所有脚本里的 `C:\path\to\deepseek-harness\default-workspace` 改成你的实际路径
-5. **密钥**：`config.json` 自己写（`consoleToken`、`allow.groups`、`allow.private`、`ownerQQ`）
-6. **SnowLuma 必须手动点一次 UAC** —— 开机由 `startup-snow.ps1` 弹窗，之后 `restart-snow-uac.bat` 可手动重启
+2. **配置**：复制 config.example.json 为 qq-bridge/config.json，改 8 处占位（详见 [QUICKSTART](docs/QUICKSTART.md) 第 3 节）
+3. **预设**：把 `presets/qq-chat-v2.patch.yml` 装进 DSH 的 `qq-agent-presets`，`qq-tool-restrict.mjs` 放同目录
+4. **人格卡**：`persona/鲸鱼娘.template.md` 复制到 `roles/`，按你的群改写
+5. **路径**：所有脚本里的 `C:\path\to\deepseek-harness\default-workspace` 改成你的实际路径
+6. **密钥**：`config.json` 自己写（`consoleToken`、`allow.groups`、`allow.private`、`ownerQQ`）
+7. **SnowLuma 必须手动点一次 UAC** —— 开机由 `startup-snow.ps1` 弹窗，之后 `restart-snow-uac.bat` 可手动重启
 
 **最低要求**：Windows + Node 24 + DSH + SnowLuma + 一个 QQ 小号。
 

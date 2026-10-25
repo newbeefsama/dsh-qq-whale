@@ -83,58 +83,34 @@ Copy-Item 本仓库\presets\qq-tool-restrict.mjs $env:USERPROFILE\.dsh\plugins\q
 
 ## 3. 写 config.json
 
-`qq-bridge/config.json` **不会被提交到仓库**（里面有密钥）。你需要自己写一份。
+`qq-bridge/config.json` **不会被提交到仓库**（里面有密钥）。
 
-最小可用版本（把 `<>` 换成你的真实值）：
+**直接复制仓库根目录的 `config.example.json`** 改个名：
 
-```json
-{
-  "dsh": {
-    "baseUrl": "http://127.0.0.1:端口",
-    "provider": "deepseek-account",
-    "model": "deepseek-flash",
-    "reasoningEffort": "high"
-  },
-  "snowluma": {
-    "httpUrl": "http://127.0.0.1:3000",
-    "httpToken": "<SnowLuma 的 HTTP accessToken>",
-    "wsUrl": "ws://127.0.0.1:3001",
-    "wsToken": "<SnowLuma 的 WS accessToken>"
-  },
-  "account": { "uin": <你的QQ号> },
-  "ownerQQ": <操作者QQ号>,
-  "consoleToken": "<自己随便打一串长的>",
-  "allow": {
-    "groups": [<要它进的群号>],
-    "private": [<允许私聊它的人>]
-  },
-  "role": {
-    "name": "鲸鱼娘",
-    "maxInjectChars": 12000
-  },
-  "socialV2": {
-    "tools": {
-      "mood": true,
-      "relay": true,
-      "watchVideo": true,
-      "setStickerRemark": false,
-      "sendVoice": false
-    },
-    "wake": {
-      "preSleepWaitMs": 120000,
-      "minProbability": 0.2,
-      "prioritySpeakers": [],
-      "maxWakePerHour": 30
-    },
-    "context": {
-      "recentLimit": 300,
-      "unreadLimit": 120,
-      "wakeMessageLimit": 30,
-      "wakeMaxChars": 8000
-    }
-  }
-}
+```powershell
+Copy-Item config.example.json 你的工作区\qq-bridge\config.json
 ```
+
+它是从一份**真实运行的配置**导出的，200+ 个字段齐全、自带我们调好的参数。你只需要改 **8 处**（`<>` 包着的那些）：
+
+| # | 字段 | 填什么 |
+|---|---|---|
+| 1 | `dsh.baseUrl` | `http://127.0.0.1:<DSH 端口>`。**DSH 每次启动端口都变**，随便填一个，`recover.ps1` 会自动改对 |
+| 2 | `snowluma.accessToken` | SnowLuma WebUI → OneBot 配置里的 accessToken |
+| 3 | `snowluma.launcherPath` | SnowLuma 解压目录的绝对路径 |
+| 4 | `snowluma.homeDir` | 同上 |
+| 5 | `ownerQQ` | 你自己的 QQ 号（**只有这个号的私聊能收到报错、能触发转达**） |
+| 6 | `sessionCwd` | 你的工作区绝对路径 |
+| 7 | `allow` | `groups` 填要它进的群号，`private` 填允许私聊它的人 |
+| 8 | `consoleToken` | 自己随便打一串长的（之后所有控制台请求都用它） |
+
+**其余字段的含义：**
+
+- `socialV2.wake` —— 唤醒策略。`minProbability: 0.2` 是**我们加的下限**（防止 AI 把自己调到 0.05 导致叫不醒）
+- `socialV2.context` —— 缓冲区大小。`recentLimit: 300` / `unreadLimit: 120`，默认的 100/30 在活跃群会丢消息
+- `socialV2.tools` —— 工具开关。`mood` / `relay` / `watchVideo` 是我们新增的
+- `role.maxInjectChars` —— 人格卡注入上限。默认 1000 太小，建议 12000
+- `slang` / `social` / `pricing` / `webSearch` —— 上游功能，保持默认即可
 
 ### ⚠️ 改配置的铁律
 
@@ -146,9 +122,22 @@ Copy-Item 本仓库\presets\qq-tool-restrict.mjs $env:USERPROFILE\.dsh\plugins\q
 ```powershell
 $tok = Get-Content 你的工作区\qq-bridge\state\console-token -Raw
 $h = @{ 'x-console-token' = $tok; Authorization = 'Bearer ' + $tok }
-$body = (Get-Content config.json -Raw | ConvertFrom-Json).socialV2 | ConvertTo-Json -Depth 8
+# 先把当前配置读出来
+$cur = Invoke-RestMethod -Uri 'http://127.0.0.1:3100/api/socialV2/config' -Headers $h
+# 只改 wake 段，其余原样带回去（服务端是浅合并，漏传的段会保留，但别赌）
+$wake = $cur.config.wake
+$wake.preSleepWaitMs = 120000
+$wake.minProbability  = 0.2
 Invoke-RestMethod -Uri 'http://127.0.0.1:3100/api/socialV2/config' -Method Post `
-  -Headers $h -ContentType 'application/json' -Body "{`"wake`": $((($body | ConvertFrom-Json).wake) | ConvertTo-Json -Depth 8)}"
+  -Headers $h -ContentType 'application/json' `
+  -Body (@{ wake = $wake } | ConvertTo-Json -Depth 8)
+```
+
+**验证确实生效**（内存和文件都要看）：
+
+```powershell
+(Invoke-RestMethod -Uri 'http://127.0.0.1:3100/api/socialV2/config' -Headers $h).config.wake.preSleepWaitMs
+(Get-Content 你的工作区\qq-bridge\config.json -Raw | ConvertFrom-Json).socialV2.wake.preSleepWaitMs
 ```
 
 ---
