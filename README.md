@@ -174,15 +174,50 @@ tools/          运维脚本
 
 ---
 
-## 部署要点（如果你想复刻）
+## 部署
 
-1. **先装好 [qq-bridge](https://github.com/Derpyu520/qq-bridge)**，用本仓库 `bridge/` 覆盖它的 `src/`
-2. **配置**：复制 config.example.json 为 qq-bridge/config.json，改 8 处占位（详见 [QUICKSTART](docs/QUICKSTART.md) 第 3 节）
-3. **预设**：把 `presets/qq-chat-v2.patch.yml` 装进 DSH 的 `qq-agent-presets`，`qq-tool-restrict.mjs` 放同目录
-4. **人格卡**：`persona/鲸鱼娘.template.md` 复制到 `roles/`，按你的群改写
-5. **路径**：所有脚本里的 `C:\path\to\deepseek-harness\default-workspace` 改成你的实际路径
-6. **密钥**：`config.json` 自己写（`consoleToken`、`allow.groups`、`allow.private`、`ownerQQ`）
-7. **SnowLuma 必须手动点一次 UAC** —— 开机由 `startup-snow.ps1` 弹窗，之后 `restart-snow-uac.bat` 可手动重启
+**先装好这几样**（安装器只负责把它们接起来，不代装）：
+
+- [qq-bridge](https://github.com/Derpyu520/qq-bridge) —— `git clone` + `npm install`
+- **SnowLuma** —— QQ 协议端，已经扫码登录过一次
+- **DeepSeek Harness** 桌面版
+- **Node.js 24+**（`node:sqlite` 需要）
+
+然后**右键「以管理员身份运行 PowerShell」**：
+
+```powershell
+cd 你克隆本仓库的目录
+.\install.ps1
+```
+
+它会问 8 个问题（能自动探测的都帮你填好了），然后一次做完：
+
+```
+生成 config.json  →  替换脚本路径  →  接入 DSH（插件 + profile + MCP 注册）
+    →  注册计划任务  →  创建开机启动快捷方式  →  跑一遍验证清单
+```
+
+**可以重复执行**（幂等）。已有配置会先备份。
+
+### 参数
+
+| 参数 | 用途 |
+|---|---|
+| `-Unattended` | 不交互，值从 `QQWHALE_WORKSPACE` / `QQWHALE_BRIDGE` / `QQWHALE_SNOW` / `QQWHALE_OWNER_QQ` / `QQWHALE_ALLOW_GROUPS` / `QQWHALE_ALLOW_PRIVATE` 环境变量读 |
+| `-DshHome <path>` | DSH 用户目录，默认 `~/.dsh` |
+| `-SkipSystem` | 不注册计划任务、不建快捷方式 |
+| `-SkipDsh` | 不写 DSH 配置 |
+
+后两个是给自动化测试用的 —— **不加它们、在临时目录里试跑，会覆盖你真实机器的计划任务和快捷方式**（写安装器时踩过）。
+
+### 手动部署（不想用安装器）
+
+1. 用本仓库 `bridge/` 覆盖 qq-bridge 的 `src/`
+2. 把 `presets/` 下的文件装进 `~/.dsh/plugins/qq-agent-presets/`，并在 profile 的 `package.json` 里登记
+3. `persona/鲸鱼娘.template.md` 复制到 `qq-bridge/roles/鲸鱼娘.md`，按你的群改写
+4. 复制 `config.example.json` 为 `config.json`，改 8 处占位
+5. `tools/` 里的占位路径换成你的真实路径
+6. 用管理员 PowerShell 注册计划任务：每 2 分钟跑一次 `watchdog.ps1`（勾「使用最高权限运行」）
 
 **最低要求**：Windows + Node 24 + DSH + SnowLuma + 一个 QQ 小号。
 
