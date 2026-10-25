@@ -757,6 +757,29 @@ function loadConfig() {
       autoReplyCheckMs: 30000,
       agentPreset: 'qq-chat-v2',
       provideRecommendations: true,
+      // ── 记忆（本地改动 2026-10-25：原来这些参数写死在代码里，现在可配）──
+      memory: {
+        // 重要度 1~5 各自多久淡到一半（天）。想让它记性更长就调大。
+        halfLifeDays: { 1: 2, 2: 7, 3: 14, 4: 30, 5: 90 },
+        pruneWeight: 0.03,     // 权重低于这个才真删；调 0 = 永不删除（只降权重不清理）
+        maxEntries: 40,        // 话题上限，超了挤掉权重最低的
+        reviveMinGrams: 2      // 被重新提起的判定：至少几个 3 字片段同时命中
+      },
+      // ── 心情 ──
+      mood: {
+        overallHalfLifeHours: 12,       // 总心情回落一半要几小时
+        valueHalfLifeMinutes: 90,       // 单根情绪消散一半要几分钟
+        stepScale: 0.3333333,           // 步长削到多少（1 = 不削，容易永远满格 = 没有心情）
+        maxStep: 20,                    // 单次单根上限
+        biasOverallHalfLifeMinutes: 45, // 会话偏移的总心情半衰期
+        biasValueHalfLifeMinutes: 30    // 会话偏移的单根情绪半衰期
+      },
+      // ── 上下文轮换 ──
+      rotate: {
+        turns: 25,                   // 跑多少轮换新会话（实测 38 轮开始卡死）
+        handoffRecentMessages: 30,   // 交接摘要里带多少条最近消息
+        handoffMaxChars: 2200        // 摘要上限（别调太大，否则新会话立刻又撑爆）
+      },
       tools: {
         getPrompt: true,
         getUnread: true,
@@ -2619,7 +2642,7 @@ async function main() {
           if (st) {
             st.turnCount = (Number(st.turnCount) || 0) + 1;
             try { saveSocialV2State(); } catch {}
-            if (st.turnCount % 5 === 0) log(`会话 ${key} 已跑 ${st.turnCount} 轮（到 ${AUTO_ROTATE_TURNS} 轮自动轮换）`);
+            if (st.turnCount % 5 === 0) log(`会话 ${key} 已跑 ${st.turnCount} 轮（到 ${rotateCfg().turns} 轮自动轮换）`);
           }
         }
       }
@@ -2973,9 +2996,20 @@ async function main() {
   //     - 对关键人物的印象
   //   新会话第一轮唤醒时把这份摘要注入，之后清掉。这样它记得「刚聊到哪」，
   //   只是忘了早上更早的那些轮次。
-  const AUTO_ROTATE_TURNS = 25;          // 超过这么多轮就轮换
-  const HANDOFF_RECENT_MESSAGES = 30;    // 摘要里带多少条最近消息
-  const HANDOFF_MAX_CHARS = 2200;        // 摘要上限
+  // 这三个也可以从 config.json 的 socialV2.rotate 改（本地改动 2026-10-25）
+  const ROTATE_DEFAULTS = { turns: 25, handoffRecentMessages: 30, handoffMaxChars: 2200 };
+  function rotateCfg() {
+    const c = (cfg.socialV2 && cfg.socialV2.rotate) || {};
+    const num = (v, d, min, max) => {
+      const x = Number(v);
+      return Number.isFinite(x) ? Math.min(max, Math.max(min, x)) : d;
+    };
+    return {
+      turns: Math.round(num(c.turns, ROTATE_DEFAULTS.turns, 3, 500)),
+      handoffRecentMessages: Math.round(num(c.handoffRecentMessages, ROTATE_DEFAULTS.handoffRecentMessages, 5, 200)),
+      handoffMaxChars: Math.round(num(c.handoffMaxChars, ROTATE_DEFAULTS.handoffMaxChars, 400, 20000))
+    };
+  }
 
   /** 从当前会话状态里攒一份交接摘要。只在轮换前调用一次。 */
   function buildHandoff(key) {
@@ -2985,7 +3019,7 @@ async function main() {
       const out = [];
 
       // 1. 最近对话（按时间正序，谁说的都留）
-      const recent = Array.isArray(st.recentMessages) ? st.recentMessages.slice(-HANDOFF_RECENT_MESSAGES) : [];
+      const recent = Array.isArray(st.recentMessages) ? st.recentMessages.slice(-rotateCfg().handoffRecentMessages) : [];
       if (recent.length) {
         out.push('【轮换前最近聊的】');
         for (const m of recent) {
@@ -3017,7 +3051,7 @@ async function main() {
 
       if (!out.length) return '';
       let text = out.join('\n');
-      if (text.length > HANDOFF_MAX_CHARS) text = truncateText(text, HANDOFF_MAX_CHARS - 20) + '\n…（太长截断了）';
+      if (text.length > rotateCfg().handoffMaxChars) text = truncateText(text, rotateCfg().handoffMaxChars - 20) + '\n…（太长截断了）';
       return text;
     } catch {
       return '';
@@ -8470,7 +8504,7 @@ async function main() {
           // 让新会话第一轮就能接着聊 —— 忘掉远期细节，保留最近细节。
           const stNow = socialV2.conversations.get(canonicalV2Key(key));
           const turns = Number(stNow?.turnCount) || 0;
-          if (turns >= AUTO_ROTATE_TURNS) {
+          if (turns >= rotateCfg().turns) {
             try {
               const handoff = buildHandoff(key);
               if (stNow && handoff) stNow.handoffText = handoff;
@@ -9283,12 +9317,31 @@ async function main() {
   // ══════════════════════════════════════════════════════════════════════
   const MOOD_KEYS = ['开心', '踏实', '甜蜜', '心疼', '担心', '难过', '吃醋'];
   const MOOD_BASELINE = 50;                       // 总心情的中性值
-  const MOOD_OVERALL_HALF_LIFE_MS = 12 * 3600e3;  // 总心情回落半衰期
-  const MOOD_VALUE_HALF_LIFE_MS = 90 * 60e3;      // 单根情绪消散半衰期
-  const MOOD_STEP_SCALE = 1 / 3;                  // 步长削到三分之一
-  // 会话偏移散得更快：它代表「这次对话带来的临时情绪」，聊完就该淡掉
-  const MOOD_BIAS_OVERALL_HALF_LIFE_MS = 45 * 60e3;
-  const MOOD_BIAS_VALUE_HALF_LIFE_MS = 30 * 60e3;
+  // 这些参数可以从 config.json 的 socialV2.mood 改（本地改动 2026-10-25）。
+  // 之前写死 —— 别人想调心情散得快慢、步长要不要削，只能动源码。
+  const MOOD_DEFAULTS = {
+    overallHalfLifeMs: 12 * 3600e3,     // 总心情回落半衰期
+    valueHalfLifeMs: 90 * 60e3,         // 单根情绪消散半衰期
+    stepScale: 1 / 3,                   // 步长削到三分之一
+    maxStep: 20,                        // 单次单根上限
+    biasOverallHalfLifeMs: 45 * 60e3,   // 会话偏移（散得更快）
+    biasValueHalfLifeMs: 30 * 60e3
+  };
+  function moodCfg() {
+    const c = (cfg.socialV2 && cfg.socialV2.mood) || {};
+    const num = (v, d, min, max) => {
+      const x = Number(v);
+      return Number.isFinite(x) ? Math.min(max, Math.max(min, x)) : d;
+    };
+    return {
+      overallHalfLifeMs: num(c.overallHalfLifeHours != null ? Number(c.overallHalfLifeHours) * 3600e3 : c.overallHalfLifeMs, MOOD_DEFAULTS.overallHalfLifeMs, 60e3, 30 * 24 * 3600e3),
+      valueHalfLifeMs: num(c.valueHalfLifeMinutes != null ? Number(c.valueHalfLifeMinutes) * 60e3 : c.valueHalfLifeMs, MOOD_DEFAULTS.valueHalfLifeMs, 60e3, 7 * 24 * 3600e3),
+      stepScale: num(c.stepScale, MOOD_DEFAULTS.stepScale, 0.05, 1),
+      maxStep: Math.round(num(c.maxStep, MOOD_DEFAULTS.maxStep, 1, 100)),
+      biasOverallHalfLifeMs: num(c.biasOverallHalfLifeMinutes != null ? Number(c.biasOverallHalfLifeMinutes) * 60e3 : c.biasOverallHalfLifeMs, MOOD_DEFAULTS.biasOverallHalfLifeMs, 60e3, 7 * 24 * 3600e3),
+      biasValueHalfLifeMs: num(c.biasValueHalfLifeMinutes != null ? Number(c.biasValueHalfLifeMinutes) * 60e3 : c.biasValueHalfLifeMs, MOOD_DEFAULTS.biasValueHalfLifeMs, 60e3, 7 * 24 * 3600e3)
+    };
+  }
   const GLOBAL_MOOD_FILE = path.join(STATE_DIR, 'global-mood.json');
 
   function normalizeMoodState(raw) {
@@ -9365,10 +9418,11 @@ async function main() {
 
   function globalMoodDecayed() {
     const before = readGlobalMood();
+    const mc = moodCfg();
     const after = decayMood(
       normalizeMoodState(before),
-      MOOD_OVERALL_HALF_LIFE_MS,
-      MOOD_VALUE_HALF_LIFE_MS
+      mc.overallHalfLifeMs,
+      mc.valueHalfLifeMs
     );
     if (after.updatedAt !== before.updatedAt) writeGlobalMood(after);
     return after;
@@ -9376,7 +9430,8 @@ async function main() {
 
   function moodBiasDecayed(st) {
     const b = normalizeMoodBias(st?.moodBias);
-    return decayMood(b, MOOD_BIAS_OVERALL_HALF_LIFE_MS, MOOD_BIAS_VALUE_HALF_LIFE_MS, 0);
+    const mc = moodCfg();
+    return decayMood(b, mc.biasOverallHalfLifeMs, mc.biasValueHalfLifeMs, 0);
   }
 
   /** 某个会话此刻的「有效心情」= 全局 + 偏移。 */
@@ -9408,12 +9463,13 @@ async function main() {
    */
   function applyMoodUpdate(st, deltas, reason, overallDelta) {
     if (!st) return null;
+    const mc = moodCfg();          // 一次取值，整个函数复用（别放进循环里）
     const applied = {};
     const stepped = {};
     for (const k of MOOD_KEYS) {
       const raw = Number(deltas?.[k]);
       if (!Number.isFinite(raw) || raw === 0) continue;
-      const s = Math.max(-20, Math.min(20, Math.round(raw * MOOD_STEP_SCALE)));
+      const s = Math.max(-mc.maxStep, Math.min(mc.maxStep, Math.round(raw * mc.stepScale)));
       if (s === 0) continue;
       stepped[k] = s;
       applied[k] = s;
@@ -9427,7 +9483,7 @@ async function main() {
         od += ['心疼', '担心', '难过', '吃醋'].includes(k) ? v * 0.3 : v * 0.6;
       }
     }
-    od = Math.max(-20, Math.min(20, Math.round(od * MOOD_STEP_SCALE)));
+    od = Math.max(-mc.maxStep, Math.min(mc.maxStep, Math.round(od * mc.stepScale)));
     if (od < 0) {
       // 硬规矩：只有「为别人心疼/担心」或「自己难过」导致的下调才生效
       const caring = (stepped['心疼'] || 0) > 0 || (stepped['担心'] || 0) > 0
@@ -9509,8 +9565,33 @@ async function main() {
   //   · 不删，只是权重越来越低；被重新提起就弹回满权重
   //   · 注入时按「权重」排序而不是按时间，取前 N
   // ══════════════════════════════════════════════════════════════════════
-  const MEMORY_HALF_LIFE_DAYS = { 1: 2, 2: 7, 3: 14, 4: 30, 5: 90 };
-  const MEMORY_PRUNE_WEIGHT = 0.03;   // 权重低于这个才真正删掉
+  // 这些参数现在可以从 config.json 的 socialV2.memory 改。
+  // 原来是写死的常量 —— 别人想调半衰期只能动源码，那不算可配。
+  const MEM_DEFAULTS = {
+    halfLifeDays: { 1: 2, 2: 7, 3: 14, 4: 30, 5: 90 },
+    pruneWeight: 0.03,
+    maxEntries: 40,
+    reviveMinGrams: 2
+  };
+  function memoryCfg() {
+    const c = (cfg.socialV2 && cfg.socialV2.memory) || {};
+    const hlSrc = (c.halfLifeDays && typeof c.halfLifeDays === 'object') ? c.halfLifeDays : {};
+    const halfLifeDays = {};
+    for (const k of [1, 2, 3, 4, 5]) {
+      const v = Number(hlSrc[k]);
+      halfLifeDays[k] = Number.isFinite(v) && v > 0 ? v : MEM_DEFAULTS.halfLifeDays[k];
+    }
+    const num = (v, d, min, max) => {
+      const x = Number(v);
+      return Number.isFinite(x) ? Math.min(max, Math.max(min, x)) : d;
+    };
+    return {
+      halfLifeDays,
+      pruneWeight: num(c.pruneWeight, MEM_DEFAULTS.pruneWeight, 0, 1),
+      maxEntries: Math.round(num(c.maxEntries, MEM_DEFAULTS.maxEntries, 5, 500)),
+      reviveMinGrams: Math.round(num(c.reviveMinGrams, MEM_DEFAULTS.reviveMinGrams, 1, 6))
+    };
+  }
 
   function memoryImportance(entry) {
     const n = Number(entry?.importance);
@@ -9520,7 +9601,7 @@ async function main() {
   function memoryWeight(entry, now = Date.now()) {
     const touched = Number(entry?.lastTouchedAt) || Number(entry?.lastMentionAt) || Number(entry?.createdAt) || 0;
     if (!touched) return 1;
-    const halfLifeMs = (MEMORY_HALF_LIFE_DAYS[memoryImportance(entry)] || 14) * 24 * 3600e3;
+    const halfLifeMs = (memoryCfg().halfLifeDays[memoryImportance(entry)] || 14) * 24 * 3600e3;
     const age = Math.max(0, now - touched);
     return Math.pow(0.5, age / halfLifeMs);
   }
@@ -9528,8 +9609,9 @@ async function main() {
   // 清理权重太低的条目（不是按时间一刀切）
   function pruneMemoriesByWeight(st, now) {
     if (!st) return;
+    const keep = memoryCfg().pruneWeight;
     if (Array.isArray(st.activeTopics)) {
-      st.activeTopics = st.activeTopics.filter((t) => t && t.text && memoryWeight(t, now) >= MEMORY_PRUNE_WEIGHT);
+      st.activeTopics = st.activeTopics.filter((t) => t && t.text && memoryWeight(t, now) >= keep);
     }
     if (Array.isArray(st.pendingThoughts)) {
       st.pendingThoughts = st.pendingThoughts.filter((t) => t && (!t.expiresAt || now < Number(t.expiresAt)));
@@ -9556,11 +9638,12 @@ async function main() {
       if (text.length < 3) continue;
       const grams = new Set();
       for (let i = 0; i + 3 <= text.length; i += 1) grams.add(text.slice(i, i + 3));
+      const need = memoryCfg().reviveMinGrams;
       let hit = 0;
       for (const g of grams) {
-        if (blob.includes(g)) { hit += 1; if (hit >= 2) break; }
+        if (blob.includes(g)) { hit += 1; if (hit >= need) break; }
       }
-      if (hit >= 2) {
+      if (hit >= need) {
         const before = memoryWeight(t, now);
         t.lastTouchedAt = now;
         t.lastMentionAt = now;
@@ -9669,10 +9752,11 @@ async function main() {
           pendingQuestion: redactKnownTokensOnly(String(extra.pendingQuestion || '')).slice(0, 200)
         });
       }
-      if (st.activeTopics.length > 40) {
+      const capTopics = memoryCfg().maxEntries;
+    if (st.activeTopics.length > capTopics) {
         // 超上限时挤掉「权重最低」的，不是最老的
         st.activeTopics.sort((a, b) => memoryWeight(b, nowTs) - memoryWeight(a, nowTs));
-        st.activeTopics = st.activeTopics.slice(0, 40);
+        st.activeTopics = st.activeTopics.slice(0, capTopics);
       }
     } else if (cat === 'pendingThought' && text) {
       if (!Array.isArray(st.pendingThoughts)) st.pendingThoughts = [];

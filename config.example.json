@@ -1,5 +1,5 @@
 {
-  "_readme": "这是 qq-bridge 的配置示例。把 <> 里的内容换成你自己的一共 8 处：dsh.baseUrl 的端口、snowluma.accessToken、snowluma.launcherPath/homeDir、ownerQQ、sessionCwd、allow、consoleToken。其余是我们调过的值，可以直接用。改完记得：不要直接改 config.json 后重启，要走 POST /api/socialV2/config（否则会被内存副本覆盖）。",
+  "_readme": "qq-bridge 配置示例。把 <> 里的内容换成你自己的，共 8 处：dsh.baseUrl 的端口、snowluma.accessToken、snowluma.launcherPath/homeDir、ownerQQ、sessionCwd、allow、consoleToken。socialV2.memory / mood / rotate 三段是本项目新增的可调参数，默认值就是调过的。注意：改配置不要直接改文件后重启（会被内存副本覆盖），要走 POST /api/socialV2/config。",
   "dsh": {
     "baseUrl": "http://127.0.0.1:50000",
     "provider": "deepseek-account",
@@ -259,6 +259,31 @@
       "maxBytes": 8388608,
       "maxPixels": 64000000,
       "maxCount": 5
+    },
+    "mood": {
+      "overallHalfLifeHours": 12,
+      "valueHalfLifeMinutes": 90,
+      "stepScale": 0.3333333,
+      "maxStep": 20,
+      "biasOverallHalfLifeMinutes": 45,
+      "biasValueHalfLifeMinutes": 30
+    },
+    "memory": {
+      "halfLifeDays": {
+        "1": 2,
+        "2": 7,
+        "3": 14,
+        "4": 30,
+        "5": 90
+      },
+      "pruneWeight": 0.03,
+      "maxEntries": 40,
+      "reviveMinGrams": 2
+    },
+    "rotate": {
+      "turns": 25,
+      "handoffRecentMessages": 30,
+      "handoffMaxChars": 2200
     }
   },
   "webSearch": {

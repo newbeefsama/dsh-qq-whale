@@ -113,6 +113,51 @@ Copy-Item config.example.json 你的工作区\qq-bridge\config.json
 - `role.maxInjectChars` —— 人格卡注入上限。默认 1000 太小，建议 12000
 - `slang` / `social` / `pricing` / `webSearch` —— 上游功能，保持默认即可
 
+### 可调参数（记忆 / 心情 / 轮换）
+
+这三段的参数**原来是写死在代码里的**，现在可以从配置改。
+
+**记忆** `socialV2.memory`
+
+| 参数 | 默认 | 作用 |
+|---|---|---|
+| `halfLifeDays` | `{1:2, 2:7, 3:14, 4:30, 5:90}` | 重要度 1~5 各自几天淡到一半。想让它记性更长就调大 |
+| `pruneWeight` | `0.03` | 权重低于这个才真删。**调 0 = 永不删除**（只降权重不清理） |
+| `maxEntries` | `40` | 话题上限，超了挤掉权重最低的 |
+| `reviveMinGrams` | `2` | 被重新提起的判定阈值：几个 3 字片段同时命中才算 |
+
+**心情** `socialV2.mood`
+
+| 参数 | 默认 | 作用 |
+|---|---|---|
+| `overallHalfLifeHours` | `12` | 总心情回落一半要几小时（隔一夜还有余温） |
+| `valueHalfLifeMinutes` | `90` | 单根情绪消散一半要几分钟 |
+| `stepScale` | `0.3333333` | **步长削到多少**。调 1 = 不削，但情绪判定天然偏正，不削会永远满格 = 没有心情 |
+| `maxStep` | `20` | 单次单根上限 |
+| `biasOverallHalfLifeMinutes` | `45` | 会话偏移的总心情半衰期 |
+| `biasValueHalfLifeMinutes` | `30` | 会话偏移的单根情绪半衰期 |
+
+**上下文轮换** `socialV2.rotate`
+
+| 参数 | 默认 | 作用 |
+|---|---|---|
+| `turns` | `25` | 跑多少轮换新会话。**实测 38 轮开始卡死**（37 万 token 后只输出 step1） |
+| `handoffRecentMessages` | `30` | 交接摘要带多少条最近消息 |
+| `handoffMaxChars` | `2200` | 摘要上限。别调太大，否则新会话立刻又撑爆 |
+
+**改法**（走接口，不是改文件）：
+
+```powershell
+$h = @{ 'x-console-token' = $tok; Authorization = 'Bearer ' + $tok }
+$cur = (Invoke-RestMethod 'http://127.0.0.1:3100/api/socialV2/config' -Headers $h).config
+$mood = $cur.mood
+$mood.stepScale = 0.5          # 想让情绪变化更明显一点
+Invoke-RestMethod 'http://127.0.0.1:3100/api/socialV2/config' -Method Post `
+  -Headers $h -ContentType 'application/json' -Body (@{ mood = $mood } | ConvertTo-Json -Depth 8)
+```
+
+改完立刻生效，**不用重启桥接**。注意 `/api/socialV2/config` 只接受控制台令牌，不能带 agent token。
+
 ### ⚠️ 改配置的铁律
 
 **不要直接改 `config.json` 然后重启。**
