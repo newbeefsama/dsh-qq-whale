@@ -7,6 +7,17 @@
 
 ---
 
+## 文档
+
+| 文档 | 看什么 |
+|---|---|
+| **本页** | 项目概览、加了什么、踩过的坑 |
+| [docs/PROJECT.md](docs/PROJECT.md) | **完整详情**：架构、每个功能的实现、真实运行数据、局限 |
+| [docs/QUICKSTART.md](docs/QUICKSTART.md) | 从零安装（含最大的那个坑的完整诊断方法） |
+| [docs/DESIGN.md](docs/DESIGN.md) | 每个取舍背后的理由 |
+
+---
+
 ## 这是什么
 
 ```
