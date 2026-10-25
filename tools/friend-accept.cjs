@@ -23,7 +23,7 @@ const WS_URL = 'ws://127.0.0.1:3001/';
 const WS_TOKEN = '-LtcaV0dlVufj8L73ziHmxFJ8NclsAiVTQpz8rXKAvU';
 const HTTP_PORT = 3000;
 const HTTP_TOKEN = '_eT4GmIxYAhAvS_kUOcXOlhkSqO_UAiTJBXW2Nmg8-Q';
-const SELF = '3036965445';
+const SELF = process.env.QQ_SELF_UIN || '';   // 机器人自己的 QQ 号，跑之前设环境变量或改这里
 
 const LOG = path.join(__dirname, '_friend.log');
 

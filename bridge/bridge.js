@@ -742,7 +742,7 @@ function loadConfig() {
       surrenderProbability: 0,        // 已弃用：桥接不再直接生成退让短句（避免割裂），保留字段兼容旧配置
       // 摘要与展示
       maxReplyChars: 500,             // 单条 QQ 消息安全长度上限（防 AI 出 bug；分句交给 AI 用空格控制）
-      mustReplyKeywords: ['deepseek', '小鲸鱼', '大肥鱼', '鲸鱼', 'd指导', '在吗'],
+      mustReplyKeywords: ['deepseek', '小助手', '大肥鱼', '鲸鱼', 'd指导', '在吗'],
       // 真人式多消息分条发送：按空格分句，AI 用空格表示“这里要分成下一条”
       burstEnabled: true,             // 总开关：是否允许按空格拆成多条 QQ 消息
       burstIntervalMinMs: 1000,       // 条间随机间隔下限（毫秒）
@@ -799,7 +799,7 @@ function loadConfig() {
         recommendedSleepMinMs: 300000,
         recommendedSleepMaxMs: 7200000,
         recommendedProbability: 0.05,
-        recommendedKeywords: ['小鲸鱼', 'DeepSeek', 'deepseek', 'DS', 'D老师', 'd老师', 'D指导', 'd指导', 'D师傅', 'd师傅', '深度求索', '大肥鱼', '鲸鱼', 'DeepSeek V3', 'DeepSeek R1', 'R1'],
+        recommendedKeywords: ['小助手', 'DeepSeek', 'deepseek', 'DS', 'D老师', 'd老师', 'D指导', 'd指导', 'D师傅', 'd师傅', '深度求索', '大肥鱼', '鲸鱼', 'DeepSeek V3', 'DeepSeek R1', 'R1'],
         recommendedAtMention: true,
         recommendedNameMention: true,
         recommendedQuestion: true,
@@ -6310,7 +6310,7 @@ async function main() {
           // 压到 60 秒后它永远凑不满观察窗口 → 睡不下去、也不回话，
           // 变成每 60 秒调一次 wait_for_messages 的死循环（19:51~19:56 连调 14 次）。
           //
-          // 而"别人说过话"并不等于"需要我回"：19:51 那批是画师在调扫鲸鱼的声音，
+          // 而"别人说过话"并不等于"需要我回"：19:51 那批是群主在调群主的bot的声音，
           // 机器人判断与自己无关、正确选择了不插话 —— 这个压缩反而惩罚了正确行为。
           //
           // 现在靠 preSleepWaitMs（已从 5 分钟降到 3 分钟）兜住最坏情况的黑屏时长。
@@ -8368,7 +8368,7 @@ async function main() {
    *
    * 只有「操作者私聊」可以。原因是实测事故：
    * 16:09~16:40 模型余额不足，桥接把 64 条「⚠️ agent 处理出错：Insufficient Balance」
-   * 当成正常回复发了出去 —— 群里一条、群友小鲸鱼的私聊里一大堆。
+   * 当成正常回复发了出去 —— 群里一条、群友小助手的私聊里一大堆。
    * 群友看到的是机器人对着自己刷报错。
    *
    * 原生设计是给 closed-agent 模式用的（你自己私聊 DSH 排障，报错回给你正合适），
@@ -9188,7 +9188,7 @@ async function main() {
   }
 
   // ── 跨会话共享记忆（本地改动）─────────────────────────────────────────
-  // 目的：跟栩私聊时写下的记忆，罗辑那边也看得到。
+  // 目的：跟群友F私聊时写下的记忆，群友A那边也看得到。
   // 只存「短条目」，上限 60 条，注入时最多取最近 12 条，避免把提示词撑爆。
   const SHARED_MEMORY_MAX_ENTRIES = 60;
   const SHARED_MEMORY_INJECT_LIMIT = 20;
@@ -9745,7 +9745,7 @@ async function main() {
   // 是否"直接针对 AI"的提问/挑战：提到 AI 相关词且带疑问/比较，或对"你"开火，或追问催促
   function isDirectedAtAi(textContent) {
     const lower = String(textContent ?? '').toLowerCase();
-    const aiMention = /deepseek|claude|chatgpt|gpt|大肥鱼|小鲸鱼|鲸鱼|d指导|d老师|d师傅|深度求索|\bds\b|ai|人工智障|机器人|模型/.test(lower);
+    const aiMention = /deepseek|claude|chatgpt|gpt|大肥鱼|小助手|鲸鱼|d指导|d老师|d师傅|深度求索|\bds\b|ai|人工智障|机器人|模型/.test(lower);
     const challenge = /强|弱|行不行|能不能|会不会|是不是|一半|水平|垃圾|废物|白嫖|菜|不如|厉害|赢|输|比.*强|比.*弱/.test(lower);
     const question = /[?？吗呢吧]|怎么|为什么|哪|谁/.test(lower);
     if (aiMention && (question || challenge)) return true;
@@ -10879,7 +10879,7 @@ async function main() {
     }
     if (tr.question && isDirectedAtAi(plainContent)) return 'question';
     // ── 分层注意力（本地改动，2026-10-23）──────────────────────────────
-    // 需求：对小鲸鱼这种「主要对手」要特殊关注，但普通群友也不能漏。
+    // 需求：对小助手这种「主要对手」要特殊关注，但普通群友也不能漏。
     // 做法分两层：
     //   1) wake.prioritySpeakers（配置里的重点人物）—— 这些人说话**必定**唤醒，
     //      而且是配置级的，AI 自己调 set_wake_config 清不掉（清掉也不会丢）。
@@ -11348,7 +11348,7 @@ async function main() {
     proactiveCheck: 20
   };
 
-  // 唤醒原因可能带子类型（如 keyword:小鲸鱼、speaker:昵称），取冒号前的基名计算优先级。
+  // 唤醒原因可能带子类型（如 keyword:小助手、speaker:昵称），取冒号前的基名计算优先级。
   function wakePriorityV2(reason) {
     const base = String(reason ?? '').split(':')[0];
     return WAKE_PRIORITY[base] ?? 0;
@@ -12450,7 +12450,7 @@ async function main() {
                 // ── 本地改动（2026-10-23）：错误只回给操作者，绝不发到群/普通好友 ──
                 // 事故：16:09~16:40 余额不足（Insufficient Balance）期间，这里把
                 // 「⚠️ agent 处理出错：…」当成正常回复发出去，一共往 QQ 发了 64 条，
-                // 其中一大半给了群友小鲸鱼。原设计针对 closed-agent（你私聊排障，
+                // 其中一大半给了群友小助手。原设计针对 closed-agent（你私聊排障，
                 // 报错给你正合适），但 reserved2 模式下 key 可能是群或任意好友 —— 必须闸住。
                 if (shouldNotifyErrorsToQQ(key)) {
                   await sendToQQ(key, `⚠️ agent 处理出错：${safeMsg}`);

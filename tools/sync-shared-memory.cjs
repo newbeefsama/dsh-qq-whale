@@ -2,7 +2,7 @@
 //
 // 背景（2026-10-22）：
 //   qq-bridge 的架构是「一个 QQ 会话 = 一个独立 DSH 会话」，
-//   所以跟栩私聊时的上下文，罗辑那边看不到 —— 记忆天然隔离。
+//   所以跟群友F私聊时的上下文，群友A那边看不到 —— 记忆天然隔离。
 //   桥接的 qq_memory_* 也是按会话 key 存的，没有跨会话共享的开关。
 //
 // 解法：
@@ -22,21 +22,21 @@ const { DatabaseSync } = require('node:sqlite');
 
 const BRIDGE_DIR = path.join(__dirname, '..', '..', 'qq-bridge');
 const ROLE = path.join(BRIDGE_DIR, 'roles', '鲸鱼娘.md');
-const DB = path.join(__dirname, '..', 'SnowLuma', 'data', '3036965445', 'messages.db');
+const DB = path.join(__dirname, '..', 'SnowLuma', 'data', '000000000', 'messages.db');
 
-const SELF = '3036965445';
-const GROUP = '1001774339';
+const SELF = '000000000';
+const GROUP = '000000000';
 const BEGIN = '<!-- SHARED-MEMORY: BEGIN（自动生成，勿手改）-->';
 const END = '<!-- SHARED-MEMORY: END -->';
 
 // 谁值得写进共享记忆（昵称用于输出）
 const PEOPLE = {
-  '000000000': { name: '一只闲鱼（你的操作者）', maxLines: 3 },
-  '000000000': { name: '栩', maxLines: 3 },
-  '000000000': { name: '罗辑', maxLines: 3 },
-  '000000000': { name: 'LANGRISSER', maxLines: 3 },
-  '000000000': { name: '小鲸鱼（群里）', maxLines: 3 },
-  '3795825851': { name: '画师（群主）', maxLines: 1 },
+  // 示例：把 QQ 号换成你群里真实的人。
+  // 这张表决定「谁在人格卡的自动段里占多少篇幅」——话多的人给多几行。
+  '111111111': { name: '管理员（你的操作者）', maxLines: 3 },
+  '222222222': { name: '群友A', maxLines: 3 },
+  '333333333': { name: '群友B', maxLines: 3 },
+  '444444444': { name: '群主', maxLines: 1 },
 };
 
 // 只保留最近这么多小时的内容
@@ -188,8 +188,8 @@ function buildSelfNotes() {
     out.push('【这一段人，我摸清了】');
     // 去掉 trait 里重复的人名前缀。
     // AI 写记忆时习惯把名字也写进内容（"000000000：私聊陌生人…"、
-    // "罗辑会拿大肥鱼故意钓鱼…"），而外面已经加了 "- 名字："，
-    // 不清理就会出现「罗辑：罗辑会拿…」这种读着别扭、还白占字符的重复。
+    // "群友A会拿大肥鱼故意钓鱼…"），而外面已经加了 "- 名字："，
+    // 不清理就会出现「群友A：群友A会拿…」这种读着别扭、还白占字符的重复。
     const stripName = (trait, name) => {
       let s = String(trait || '').trim();
       const n = String(name || '').trim();
