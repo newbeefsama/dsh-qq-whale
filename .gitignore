@@ -1,0 +1,59 @@
+# 忽略：密钥、状态、日志、二进制、运行时产物
+# 这个仓库设计上只放「代码 + 文档 + 人格卡模板」
+
+# ── 密钥与凭据 ──
+config.json
+*.token
+console-token
+snow-webui-pw.txt
+_snow-webui-pw.txt
+*.bak
+*.bak.*
+cookies.txt
+
+# ── 运行状态（含记忆、聊天数据、会话映射）──
+state/
+data/
+logs/
+*.log
+*.jsonl
+*.db
+*.db-wal
+*.db-shm
+social-v2.json
+shared-memory.json
+global-mood.json
+sessions.json
+token-usage.jsonl
+tool-calls.jsonl
+
+# ── 大体积二进制 ──
+node_modules/
+SnowLuma/
+Tulpa/
+*.exe
+*.dll
+*.node
+*.bin
+*.zip
+*.7z
+*.mp4
+*.silk
+*.wav
+
+# ── 临时产物 ──
+_video_tmp/
+_video_tmp/**
+_tmp/
+asr/dl/
+*.tmp
+*.out.log
+*.err.log
+__pycache__/
+*.pyc
+
+# ── 编辑器 / 系统 ──
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
