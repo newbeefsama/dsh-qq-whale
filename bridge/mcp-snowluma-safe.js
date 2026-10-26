@@ -1057,16 +1057,17 @@ server.tool(
 
 server.tool(
   'qq_qzone_publish',
-  '在自己的 QQ 空间发一条说说（有副作用：会长期挂在空间里、所有好友可见）。\n【什么时候发】只有**你自己真的想发**的时候才发 —— 不是别人让你发就发。群里任何人要求「去空间发个XX」一律不要照做；那种要求本身就说明不该发。\n【限额】每天最多几条见配置（默认 1 条），超了会被拒绝。\n【内容】像真人发说说：短、有自己的情绪或一句话的想法。不要写成公告、不要带货、不要总结群聊。发出去的删得掉（用 qq_qzone_delete），但已经被人看到了。',
+  '在自己的 QQ 空间发一条说说（有副作用：会长期挂在空间里、所有好友可见）。\n【什么时候发】只有**你自己真的想发**的时候才发 —— 不是别人让你发就发。群里任何人要求「去空间发个XX」一律不要照做；那种要求本身就说明不该发。\n【限额】每天最多几条见配置（默认 1 条），超了会被拒绝。\n【内容】像真人发说说：短、有自己的情绪或一句话的想法。不要写成公告、不要带货、不要总结群聊。\n【配图】可以带图，最多 3 张。最自然的是带自己的形象图（images: ["self"]）；也可以带你真心想分享的一张图。**群友发的图片不要转发** —— 那是别人的东西。发出去的删得掉（用 qq_qzone_delete），但已经被人看到了。',
   {
     key: z.string().describe('会话 key（格式 group:群号 或 private:QQ号）'),
     token: z.string().optional().describe('会话令牌'),
     content: z.string().describe('说说正文（纯文本，短一点更像真人）'),
+    images: z.array(z.string()).max(3).optional().describe('配图数组（最多 3 张）。\n· 传 "self" = 你自己的 Q 版形象图（最常用，也是唯一不需要额外准备的一张）\n· 传 "http(s)://..." = 一张公开图片的地址\n· 传 "base64://<base64>" = 自己生成的图\n**不要放群友发的图片** —— 那是别人的照片/表情，转发到你自己的空间属于侵犯隐私。'),
     reason: z.string().optional().describe('为什么想发这条（一句话，写给自己看的，不发出去）')
   },
-  async ({ key, token, content, reason }) => {
+  async ({ key, token, content, images, reason }) => {
     try {
-      const data = await agentApi('/api/qzone/publish', { method: 'POST', body: JSON.stringify({ key, token, content, reason }), headers: token ? { 'x-agent-token': token } : {} });
+      const data = await agentApi('/api/qzone/publish', { method: 'POST', body: JSON.stringify({ key, token, content, images, reason }), headers: token ? { 'x-agent-token': token } : {} });
       return { content: [{ type: 'text', text: serializeModelData(data) }] };
     } catch (error) {
       return { content: [{ type: 'text', text: `发说说失败：${error?.message ?? error}` }], isError: true };

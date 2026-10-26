@@ -7066,6 +7066,54 @@ async function main() {
             if (Array.isArray(body.targetUins) && body.targetUins.length) {
               params.target_uins = body.targetUins.map(Number).filter((n) => Number.isFinite(n) && n > 0);
             }
+            // ── 图片（本地新增 2026-10-26）──────────────────────────────
+            // SnowLuma 的 send_qzone_msg 接受 file:// / http:// / base64://。
+            // 这里只开三种来源，并按白名单解析，不让模型随手塞任意 URL：
+            //   "self"            → 它自己的 Q 版形象（assets/deepseek娘.png）
+            //   "base64://<b64>"  → 直接透传（自己生成的图）
+            //   "http(s)://..."   → 透传，但**先挡内网地址**（防 SSRF 借它的号打本机服务）
+            // 群友发的图不在这里的支持范围内 —— 转发别人的照片到空间是隐私问题，
+            // 预设里也写明了「只发自己的图」。
+            const rawImages = Array.isArray(body.images) ? body.images.slice(0, 3) : [];
+            const resolvedImages = [];
+            for (const item of rawImages) {
+              const s = String(item ?? '').trim();
+              if (!s) continue;
+              if (s === 'self') {
+                const selfPath = path.join(ROOT, 'assets', 'deepseek娘.png');
+                if (fs.existsSync(selfPath)) {
+                  const buf = fs.readFileSync(selfPath);
+                  if (buf.length <= 5 * 1024 * 1024) {
+                    resolvedImages.push('base64://' + buf.toString('base64'));
+                  }
+                }
+                continue;
+              }
+              if (s.startsWith('base64://')) {
+                const payload = s.slice('base64://'.length);
+                // 粗略估算解码后大小（base64 膨胀 4/3）
+                if (payload.length * 0.75 <= 5 * 1024 * 1024) resolvedImages.push(s);
+                continue;
+              }
+              if (/^https?:\/\//i.test(s)) {
+                let host = '';
+                try { host = new URL(s).hostname.toLowerCase(); } catch { continue; }
+                const isInternal = host === 'localhost' || host === '::1'
+                  || /^127\./.test(host) || /^10\./.test(host)
+                  || /^192\.168\./.test(host)
+                  || /^172\.(1[6-9]|2\d|3[01])\./.test(host)
+                  || /^169\.254\./.test(host)
+                  || host.endsWith('.local') || host.endsWith('.internal');
+                if (isInternal) {
+                  log(`Qzone 发说说：拒绝内网图片地址 ${host}`);
+                  continue;
+                }
+                resolvedImages.push(s);
+                continue;
+              }
+              // 其它写法（如贴了个表情 id）不支持 —— 静默跳过，不让它变成报错。
+            }
+            if (resolvedImages.length) params.images = resolvedImages;
             const res = await bot.request('send_qzone_msg', params);
             if (!res || res.status !== 'ok' || res.retcode !== 0) {
               sendJson({ ok: false, error: `发说说失败：${res?.wording || res?.retcode || 'unknown'}` }, 502); return;
@@ -7074,8 +7122,8 @@ async function main() {
             qzonePublishLog.set(key, prev);
             const tid = String(res.data?.tid || res.data?.id || '');
             // 记全内容 —— 说说一旦发出去就长期可见，事后要能核对、能删。
-            log(`QQ空间发说说（来自 ${key}，可见性 ${ugcRight}，tid=${tid || '?'}）：${content.slice(0, 60)}${content.length > 60 ? '…' : ''}`);
-            sendJson({ ok: true, tid, ugcRight, usedToday: prev.length, maxPerDay, reason: String(body.reason || '').slice(0, 120) });
+            log(`QQ空间发说说（来自 ${key}，可见性 ${ugcRight}，图片 ${resolvedImages.length} 张，tid=${tid || '?'}）：${content.slice(0, 60)}${content.length > 60 ? '…' : ''}`);
+            sendJson({ ok: true, tid, ugcRight, images: resolvedImages.length, usedToday: prev.length, maxPerDay, reason: String(body.reason || '').slice(0, 120) });
           } catch (error) {
             sendJson({ ok: false, error: `发说说异常：${error?.message ?? error}` }, 502);
           }
