@@ -78,7 +78,7 @@
     "maxReplyChars": 500,
     "mustReplyKeywords": [
       "deepseek",
-      "小鲸鱼",
+      "小助手",
       "大肥鱼",
       "鲸鱼",
       "d指导",
@@ -170,7 +170,7 @@
         "欧鲸鲸",
         "豆包",
         "插饭",
-        "小鲸鱼"
+        "小助手"
       ],
       "recommendedAtMention": true,
       "recommendedNameMention": true,
