@@ -5139,6 +5139,10 @@ async function main() {
           st.wakeConfig.confirmedAt = Date.now();
           st.wakeConfig.confirmedBy = 'mark_read';
           markReadCalledKeys.add(key);
+          // 收尾顺手带的心情（没有变化可传 {}）——见 applyInlineMoodV2 的说明。
+          // 放在这里而不是更前面：上面有「沉睡前观察未满足」的提前 return，
+          // 那种情况下这轮并没有真的收尾，心情也不该落库。
+          const inlineMoodMarkRead = applyInlineMoodV2(st, body);
           saveSocialV2State();
           log(`[reserved2] 控制台/工具标记 ${key} 未读已读：${markedCount} 条，已确认下一次唤醒配置`);
           sendJson({ ok: true, key, markedCount, unreadCount: st.unread.length, readThroughSeq: readThroughSeqV2(st), wakeGuaranteed: computeWakeSafetyV2(st.wakeConfig).guaranteed, wakeSafety: computeWakeSafetyV2(st.wakeConfig), wakeConfig: st.wakeConfig });
@@ -5289,6 +5293,9 @@ async function main() {
           st.preSleepWaitSatisfiedAt = 0;
           st.preSleepWaitObservedAt = 0;
           st.preSleepWaitAccumMs = 0;
+          // 收尾顺手带的心情（没有变化可传 {}）——见 applyInlineMoodV2 的说明。
+          // 必须放在 saveSocialV2State() **之前**，否则这次心情改动不会落盘。
+          const inlineMoodWakeCfg = applyInlineMoodV2(st, body);
           saveSocialV2State();
           wakeConfigUpdatedKeys.add(key);
           wakeConfigMissCount.delete(key);
@@ -9897,6 +9904,36 @@ async function main() {
 
     const eff = effectiveMood(st);
     return { applied, mood: { overall: eff.overall, ...eff }, global: g, bias: b, effective: eff };
+  }
+
+  /**
+   * 收尾时顺手带的心情（本地新增 2026-10-26）。
+   *
+   * 起因：单独给一个 qq_mood 工具的结果是**它从来不调** —— 上线一天 0 次调用。
+   * 这跟「给了工具不等于会用」是同一个病。参考另一位养鱼作者的插件，他是
+   * 每轮在模型之外自动判一次；我们的做法更省：把心情挂到它本来每轮都要调的
+   * 收尾工具上（qq_mark_read / qq_set_wake_config 一天几十次），
+   * 收尾时顺手带一个 mood 对象即可，不增加任何额外调用。
+   *
+   * 传 {} = 这轮没有变化（也算完成了判断）。
+   */
+  function applyInlineMoodV2(st, body) {
+    if (!st) return null;
+    const raw = body?.mood;
+    if (raw === undefined || raw === null) return null;
+    if (typeof raw !== 'object' || Array.isArray(raw)) return null;
+    const deltas = (raw.deltas && typeof raw.deltas === 'object' && !Array.isArray(raw.deltas)) ? raw.deltas : {};
+    const reason = String(raw.reason ?? '').trim();
+    const overallDelta = raw.overallDelta;
+    if (!Object.keys(deltas).length && overallDelta === undefined && !reason) {
+      return { applied: {}, noChange: true };
+    }
+    try {
+      return applyMoodUpdate(st, deltas, reason, overallDelta);
+    } catch (error) {
+      log(`内联心情更新失败：${error?.message ?? error}`);
+      return null;
+    }
   }
 
   function moodLevelLabel(overall) {

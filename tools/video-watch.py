@@ -34,6 +34,16 @@ import shutil
 import socket
 import ipaddress
 import subprocess
+
+# Windows 上 Python 的 stdout 默认走控制台代码页（中文系统通常是 GBK），
+# 而调用方（MCP 服务端）按 UTF-8 读 → 所有中文变成乱码。
+# 这里强制把标准流改成 UTF-8，并且用 errors='replace' 兜底，
+# 免得个别字符再让脚本整个崩掉。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
 import tempfile
 import re
 from pathlib import Path
@@ -98,11 +108,27 @@ def assert_safe_url(url: str):
 
 
 # ── yt-dlp ─────────────────────────────────────────────────────────────
+def _decode_out(raw: bytes) -> str:
+    """子进程输出解码：先按 UTF-8，再按 GBK（中文 Windows 的控制台代码页），最后忽略错误。
+
+    为什么要兜底 GBK：whisper-cli / ffmpeg 这些本地程序在中文系统上
+    有时按控制台代码页输出，硬按 UTF-8 解会得到一串问号。
+    """
+    if not raw:
+        return ''
+    for enc in ('utf-8', 'gbk'):
+        try:
+            return raw.decode(enc)
+        except Exception:
+            continue
+    return raw.decode('utf-8', 'ignore')
+
+
 def run(cmd, cwd=None, timeout=300):
     """跑子进程，返回 (ok, stdout, stderr)。"""
     try:
         r = subprocess.run(cmd, cwd=cwd, capture_output=True, timeout=timeout)
-        return r.returncode == 0, r.stdout.decode('utf-8', 'ignore'), r.stderr.decode('utf-8', 'ignore')
+        return r.returncode == 0, _decode_out(r.stdout), _decode_out(r.stderr)
     except subprocess.TimeoutExpired:
         return False, '', f'超时（{timeout}s）'
     except Exception as e:

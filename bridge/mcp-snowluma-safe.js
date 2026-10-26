@@ -657,11 +657,16 @@ server.tool(
   {
     key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
     token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
-    throughSeq: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional().describe('本次确认已读的消息水位，使用已查看结果中的 readThroughSeq；不会清除更晚到达的消息')
+    throughSeq: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional().describe('本次确认已读的消息水位，使用已查看结果中的 readThroughSeq；不会清除更晚到达的消息'),
+    mood: z.object({
+      deltas: z.record(z.number()).optional().describe('七根情绪各变多少，例如 {开心:10, 心疼:5}；没有变化就不传'),
+      overallDelta: z.number().optional().describe('总心情变多少（不传则从情绪推）'),
+      reason: z.string().optional().describe('因为什么事（一句话）')
+    }).optional().describe('收尾时顺手带上这一轮的心情变化（没有变化传 {} 或不传，也算完成判断）。比单独调一次 qq_mood 省一次往返。')
   },
-  async ({ key, token, throughSeq }) => {
+  async ({ key, token, throughSeq, mood }) => {
     try {
-      const data = await agentApi('/api/socialV2/mark-read', { method: 'POST', body: JSON.stringify({ key, throughSeq }), headers: { 'x-agent-token': token } });
+      const data = await agentApi('/api/socialV2/mark-read', { method: 'POST', body: JSON.stringify({ mood, key, throughSeq }), headers: { 'x-agent-token': token } });
       return { content: [{ type: 'text', text: serializeModelData(data) }] };
     } catch (error) {
       return { content: [{ type: 'text', text: `标记已读失败：${error?.message ?? error}` }], isError: true };
@@ -693,11 +698,16 @@ server.tool(
         probability: z.number().optional().describe('普通消息按该概率随机唤醒（0~1）')
       }).optional(),
       batchWindowMs: z.number().optional().describe('多条消息合并唤醒窗口（毫秒，>=1000）')
-    }).describe('要设置的唤醒配置，缺省字段保留原值')
+    }).describe('要设置的唤醒配置，缺省字段保留原值'),
+    mood: z.object({
+      deltas: z.record(z.number()).optional().describe('七根情绪各变多少，例如 {开心:10, 心疼:5}；没有变化就不传'),
+      overallDelta: z.number().optional().describe('总心情变多少（不传则从情绪推）'),
+      reason: z.string().optional().describe('因为什么事（一句话）')
+    }).optional().describe('收尾时顺手带上这一轮的心情变化（没有变化传 {} 或不传，也算完成判断）。比单独调一次 qq_mood 省一次往返。')
   },
-  async ({ key, token, config, throughSeq }) => {
+  async ({ key, token, config, throughSeq, mood }) => {
     try {
-      const data = await agentApi('/api/socialV2/wake-config', { method: 'POST', body: JSON.stringify({ key, config, throughSeq }), headers: { 'x-agent-token': token } });
+      const data = await agentApi('/api/socialV2/wake-config', { method: 'POST', body: JSON.stringify({ mood, key, config, throughSeq }), headers: { 'x-agent-token': token } });
       return { content: [{ type: 'text', text: serializeModelData(data) }] };
     } catch (error) {
       return { content: [{ type: 'text', text: `设置唤醒配置失败：${error?.message ?? error}` }], isError: true };
@@ -1641,7 +1651,15 @@ if (cfg.socialV2?.tools?.watchVideo !== false) {
         const { stdout } = await execFileAsync(
           pickVideoPython(),
           [VIDEO_SCRIPT, String(url), '--frames', String(argFrames)],
-          { timeout: 720000, maxBuffer: 8 * 1024 * 1024, windowsHide: true }
+          {
+            timeout: 720000,
+            maxBuffer: 8 * 1024 * 1024,
+            windowsHide: true,
+            // 让子 Python 的 stdout 走 UTF-8。中文 Windows 下 Python 默认用
+            // 控制台代码页（GBK）写标准流，父进程按 UTF-8 读就会整段乱码 ——
+            // 实测「标题/转写」全变问号，只有 URL 正常（ASCII 不受影响）。
+            env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' }
+          }
         );
         const line = String(stdout || '').trim().split('\n').filter(Boolean).pop() || '';
         parsed = JSON.parse(line);
