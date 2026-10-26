@@ -8665,7 +8665,7 @@ async function main() {
   // 旧写法 `{...current.triggers, ...inputTriggers}` 会把模型传来的任意键原样并入、
   // 持久化、再由 qq_get_prompt 原样回给模型（每次请求都带着），等于给了一个
   // 「用 1MB 垃圾键把状态文件与每轮 prompt 撑大」的入口。
-  const WAKE_TRIGGER_KEYS = Object.freeze(['atMention', 'nameMention', 'speakerIds', 'keywords', 'question', 'poke', 'anyMessage', 'probability']);
+  const WAKE_TRIGGER_KEYS = Object.freeze(['atMention', 'nameMention', 'speakerIds', 'mutedSpeakerIds', 'keywords', 'question', 'poke', 'anyMessage', 'probability']);
   function pickWakeTriggersV2(source, fallback = {}) {
     const out = {};
     const src = source && typeof source === 'object' ? source : {};
@@ -8696,6 +8696,11 @@ async function main() {
         atMention: w.recommendedAtMention !== false,
         nameMention: w.recommendedNameMention !== false,
         speakerIds: [],
+        // 不回名单（本地改动 2026-10-26）：AI 自己维护。
+        // 名单里的人（或 bot）发言**不再构成唤醒理由**，但 @ 它 / 叫它名字仍然能叫醒。
+        // 用途：实测它会自己把群里另一个 bot 加进 speakerIds，于是对方每发 3 条它就接一次，
+        // 65% 的回复给了那个 bot —— 群友看到的就是两个 bot 互相刷屏。
+        mutedSpeakerIds: [],
         keywords: Array.isArray(w.recommendedKeywords) ? w.recommendedKeywords.map(String) : [],
         question: w.recommendedQuestion !== false,
         poke: w.recommendedPoke !== false,
@@ -8798,6 +8803,7 @@ async function main() {
     const tr = wc.triggers;
     // 掉垃圾数据只留有效 QQ 号，避免“null”/对象等脏值被当成可唤醒条件绕过防永眠。
     tr.speakerIds = normalizeSpeakerIdsV2(tr.speakerIds);
+    tr.mutedSpeakerIds = normalizeSpeakerIdsV2(tr.mutedSpeakerIds);
     const timed = !wc.infinite && wc.sleepUntil && Number.isFinite(Date.parse(wc.sleepUntil)) && Date.parse(wc.sleepUntil) > Date.now();
     const wakeable = wc.mode === 'active' || tr.anyMessage || tr.atMention || tr.nameMention || tr.poke ||
       (Array.isArray(tr.keywords) && tr.keywords.length > 0) || tr.question || Number(tr.probability) > 0 ||
@@ -8940,6 +8946,7 @@ async function main() {
           // 旧状态/异常状态里的指定成员名单也统一归一化，防止“null”/非法值污染。
           if (st.wakeConfig?.triggers && typeof st.wakeConfig.triggers === 'object') {
             st.wakeConfig.triggers.speakerIds = normalizeSpeakerIdsV2(st.wakeConfig.triggers.speakerIds);
+            st.wakeConfig.triggers.mutedSpeakerIds = normalizeSpeakerIdsV2(st.wakeConfig.triggers.mutedSpeakerIds);
             if (key.startsWith('private:')) st.wakeConfig.triggers.speakerIds = [];
           }
           // 仍使用默认唤醒配置的会话，在重启加载时同步到当前推荐/默认参数。
@@ -11014,6 +11021,16 @@ async function main() {
     const speakerId = String(event?.user_id ?? event?.sender?.user_id ?? '');
     const senderLabel = event?.sender?.card || event?.sender?.nickname || speakerId;
     if (speakerId) {
+      // 「不回名单」：AI 自己标的「这话不用理」（本地改动 2026-10-26）。
+      // 位置有意放在 at/名字/关键词/提问之后 —— 被点名或被叫名字仍然叫得醒，
+      // 拦掉的只是「他说话我就得醒」这种被动触发。
+      // 为什么需要它：实测它把群里另一个 bot 加进了 speakerIds，对方每轮发 2~3 条，
+      // 于是 65% 的回复都给了那个 bot，人插不进去。
+      const muted = Array.isArray(tr.mutedSpeakerIds) ? tr.mutedSpeakerIds.map(String) : [];
+      if (muted.includes(speakerId)) {
+        log(`[reserved2] ${key} 发言人在不回名单里（${senderLabel}），不唤醒`);
+        return null;
+      }
       const priority = Array.isArray(cfg.socialV2?.wake?.prioritySpeakers)
         ? cfg.socialV2.wake.prioritySpeakers.map(String)
         : [];
@@ -11144,6 +11161,72 @@ async function main() {
     return `【你的身份】你在 QQ 上的昵称是${label}${idText}。${callBits}；群名片可能与昵称不同，at/引用段里带${id ? ` ${id} ` : '你的 QQ 号'}就是在叫你。\n\n`;
   }
 
+  /**
+   * 「开口前先判断这一轮值不值得说」（本地改动 2026-10-26）。
+   *
+   * 起因：实测它 65% 的群回复都给了群里另一个 bot。它的记忆里明明写着
+   * 「群主的bot（群主部署的鲸鱼bot）…」，它甚至说过「别把我和它归一堆」——
+   * 但它还是接了对方 66 次。
+   *
+   * 结论：**记忆记的是事实，不是策略。** 光告诉它「那是个 bot」不会让它改变行为；
+   * 得把「判断所需的原始数据」摆到它面前，再给三条自检问题，
+   * 它才有可能自己得出结论「这轮不值得开口」。
+   *
+   * 这里只放能被验证的数字（谁在说、他说了几句、我上一条是什么、我连着发了没），
+   * 不做判断 —— 判断留给模型。
+   */
+  function buildReplyJudgementV2(st) {
+    try {
+      if (!st) return '';
+      const recent = Array.isArray(st.recentMessages) ? st.recentMessages.slice(-24) : [];
+      if (!recent.length) return '';
+      const now = Date.now();
+      // 最近的发言人（跳过自己）
+      let lastOther = null;
+      for (let i = recent.length - 1; i >= 0; i -= 1) {
+        if (!recent[i]?.isSelf) { lastOther = recent[i]; break; }
+      }
+      // 我上一条
+      let lastSelf = null;
+      for (let i = recent.length - 1; i >= 0; i -= 1) {
+        if (recent[i]?.isSelf) { lastSelf = recent[i]; break; }
+      }
+      // 末尾连续自己发言的条数（= 在自言自语）
+      let tailSelf = 0;
+      for (let i = recent.length - 1; i >= 0; i -= 1) {
+        if (recent[i]?.isSelf) tailSelf += 1; else break;
+      }
+      const mutedIds = Array.isArray(st.wakeConfig?.triggers?.mutedSpeakerIds)
+        ? st.wakeConfig.triggers.mutedSpeakerIds.map(String) : [];
+      const lines = ['【开口前 · 先判断这一轮值不值得说】'];
+      if (lastOther) {
+        const label = String(lastOther.sender || '某人');
+        const t = Number(lastOther.time) || 0;
+        const agoMin = t ? Math.round((now - t) / 60000) : 0;
+        // 最近这 24 条里他说了几句
+        const cnt = recent.filter((m) => !m.isSelf && String(m.sender || '') === label).length;
+        lines.push(`- 最近发言的是：${label}（${agoMin > 0 ? agoMin + ' 分钟前' : '刚刚'}，这 24 条里他说了 ${cnt} 句）`);
+        if (mutedIds.length) lines.push(`- 你的「不回名单」里有 ${mutedIds.length} 个人；如果上面这位在里面，他说话本来就不该叫醒你`);
+      }
+      if (lastSelf) {
+        const t = Number(lastSelf.time) || 0;
+        const agoMin = t ? Math.round((now - t) / 60000) : 0;
+        lines.push(`- 你上一条（${agoMin > 0 ? agoMin + ' 分钟前' : '刚刚'}）：${String(lastSelf.text || '').slice(0, 40)}`);
+      }
+      if (tailSelf >= 2) {
+        lines.push(`- ⚠️ 你连续发了 ${tailSelf} 条、中间没人接。现在再接，就是在自言自语。`);
+      }
+      lines.push('- 要开口，先在心里答出这三问：');
+      lines.push('  ① 这话是在跟我说话吗？还是我在别人的对话里插嘴？');
+      lines.push('  ② 我接上去能加什么新东西 —— 新信息、新梗、明确的态度？还是只是把他的话换个说法再说一遍？');
+      lines.push('  ③ 我上一条说了什么？现在再接，像不像自说自话？');
+      lines.push('- **三问都答不上来就别开口**：mark_read 或 set_wake_config 收尾都行。这一轮不开口**不算失败**。');
+      return lines.join('\n') + '\n\n';
+    } catch {
+      return '';
+    }
+  }
+
   function buildWakePromptV2(key, reason) {
     const roleState = readRoleState();
     const roleLine = roleState.role ? `【当前角色】${roleState.role}（完整角色卡请调用 qq_get_prompt 查看）\n\n` : '';
@@ -11242,7 +11325,12 @@ async function main() {
     // 后续唤醒不再带它 —— 那时它已经在这条 DSH 会话的上下文里了。
     const initialPromptText = reason === 'bootstrap' ? formatInitialPromptV2(key) : '';
     const initialPromptLine = initialPromptText ? `${initialPromptText}\n\n` : '';
-    const base = roleLine + identityLine + tokenLine + initialPromptLine + handoffLine + relayNoteLine + attentionLine + moodLine + antiAiLine + proactiveLine + stickerLine + replyLine + statusLine + wakeLine + memoryLine + participationLine + preSleepLine;
+    // 「开口前先判断这一轮值不值得说」（本地改动 2026-10-26）。
+    // 背景：它的记忆里清楚写着另一个 bot 是 bot，却还是接了对方 66 次 ——
+    // 因为记忆记的是**事实**，不是**策略**。要让它做出好判断，
+    // 得把判断所需的**数据**摆到面前：谁在说、他说了几句、我上一条说了什么、我是不是在自言自语。
+    const judgeLine = buildReplyJudgementV2(st);
+    const base = roleLine + identityLine + tokenLine + initialPromptLine + handoffLine + relayNoteLine + attentionLine + moodLine + judgeLine + antiAiLine + proactiveLine + stickerLine + replyLine + statusLine + wakeLine + memoryLine + participationLine + preSleepLine;
     if (reason === 'bootstrap') {
       return `${base}【引导唤醒】你已接入 QQ 会话 ${key}。\n当前是二代仿真模式：你的文本输出不会自动发送到 QQ，所有发言必须通过工具完成。\n请先调用 qq_get_prompt 查看角色、推荐值、可用工具和状态；有待回应的消息先按首回复节奏处理，最后才用 qq_set_wake_config 设置你希望如何被唤醒。`;
     }
