@@ -781,6 +781,16 @@ function loadConfig() {
         biasOverallHalfLifeMinutes: 45, // 会话偏移的总心情半衰期
         biasValueHalfLifeMinutes: 30    // 会话偏移的单根情绪半衰期
       },
+      // ── QQ 空间（本地改动 2026-10-26）──
+      qzone: {
+        enabled: true,
+        // 每天最多发几条说说。说说会长期挂在空间里、所有好友可见，
+        // 所以默认只给 1 条 —— 想更活跃再调大。
+        maxPerDay: 1,
+        // 默认可见性：1=所有人 4=好友 16=部分好友 64=仅自己 128=部分不可见
+        ugcRight: 1,
+        maxChars: 300
+      },
       // ── 上下文轮换 ──
       rotate: {
         turns: 25,                   // 跑多少轮换新会话（实测 38 轮开始卡死）
@@ -806,6 +816,7 @@ function loadConfig() {
         markRead: true,
         memory: true,
         mood: true,               // 情绪系统（本地新增 2026-10-25）
+        qzone: true,              // QQ 空间（本地新增 2026-10-26）
         relay: true,              // 受控转达（本地新增 2026-10-25）
         watchVideo: true,         // 看视频（本地新增 2026-10-25）
         getImages: true,
@@ -932,6 +943,7 @@ function loadConfig() {
     markRead: true,
     memory: true,
     mood: true,               // 情绪系统（本地新增 2026-10-25）
+    qzone: true,              // QQ 空间（本地新增 2026-10-26）
     relay: true,              // 受控转达（本地新增 2026-10-25）
     watchVideo: true,         // 看视频（本地新增 2026-10-25）
     slangQuery: true,
@@ -3645,6 +3657,10 @@ async function main() {
             || url.pathname.startsWith('/api/socialV2/')
             || url.pathname.startsWith('/api/send/')
             || url.pathname.startsWith('/api/images/')
+            // QQ 空间（本地改动 2026-10-26）：读说说/看动态/发说说/删说说。
+            // 每条 qzone 路由自己都用 agentTokenOk(key, token) 校验会话归属，
+            // 所以放进白名单不会变成「任意会话都能动任意空间」。
+            || url.pathname.startsWith('/api/qzone/')
             || url.pathname === '/api/authorize/read';
           if (!agentAllowed) {
             sendJson({ ok: false, error: '该接口仅控制台可用' }, 403);
@@ -6945,6 +6961,145 @@ async function main() {
           }
           return;
         }
+        // ── QQ 空间（本地新增，2026-10-26）──────────────────────────────
+        //
+        // 协议层由 SnowLuma 的 OneBot 实现提供（get_qzone_msg_list / get_qzone_feeds /
+        // send_qzone_msg / delete_qzone_msg …），桥接只是转发 + 加护栏。
+        //
+        // 为什么护栏比群消息严得多：群消息几分钟就被刷走，说说会**长期挂在空间里**、
+        // 所有好友可见。所以：
+        //   · 每天限额（默认 1 条）
+        //   · 长度上限
+        //   · 只允许不带图片（图片是别人的图，属于另一个风险面）
+        //   · 每次发布都记日志（内容 + 来源会话），方便事后核对与删除
+        // 是否允许 AI 自己判断发不发，由操作者选（见 config.socialV2.qzone）。
+        if (req.method === 'GET' && url.pathname === '/api/qzone/list') {
+          if (req.headers['x-agent-token'] && !isLiveAgentToken(req.headers['x-agent-token'])) {
+            sendJson({ ok: false, error: '未授权：会话令牌无效' }, 403); return;
+          }
+          try {
+            const count = Math.min(20, Math.max(1, Number(url.searchParams.get('count')) || 10));
+            const res = await bot.request('get_qzone_msg_list', { pos: 0, num: count });
+            if (!res || res.status !== 'ok' || res.retcode !== 0) {
+              sendJson({ ok: false, error: `读取说说失败：${res?.wording || res?.retcode || 'unknown'}` }, 502); return;
+            }
+            const list = Array.isArray(res.data?.msglist) ? res.data.msglist : [];
+            const items = list.slice(0, count).map((m) => ({
+              tid: m.tid || m.id || '',
+              content: String(m.content || m.summary || '').slice(0, 500),
+              createdTime: Number(m.created_time) || 0,
+              commentCount: Number(m.comment_count) || 0,
+              likeCount: Number(m.like_count) || 0,
+              ugcRight: Number(m.ugc_right) || null
+            }));
+            sendJson({ ok: true, total: Number(res.data?.total) || items.length, items });
+          } catch (error) {
+            sendJson({ ok: false, error: `读取说说异常：${error?.message ?? error}` }, 502);
+          }
+          return;
+        }
+        if (req.method === 'GET' && url.pathname === '/api/qzone/feeds') {
+          if (req.headers['x-agent-token'] && !isLiveAgentToken(req.headers['x-agent-token'])) {
+            sendJson({ ok: false, error: '未授权：会话令牌无效' }, 403); return;
+          }
+          try {
+            const count = Math.min(20, Math.max(1, Number(url.searchParams.get('count')) || 8));
+            const res = await bot.request('get_qzone_feeds', { page_num: 1, count });
+            if (!res || res.status !== 'ok' || res.retcode !== 0) {
+              sendJson({ ok: false, error: `读取动态失败：${res?.wording || res?.retcode || 'unknown'}` }, 502); return;
+            }
+            const feeds = Array.isArray(res.data?.feeds) ? res.data.feeds : [];
+            // 注意：get_qzone_feeds 返回的是**原始 HTML 片段**（字段 html），
+            // 不是结构化文本。这里剥掉标签、还原常见实体，只给模型干净的正文 ——
+            // 把整段 HTML 塞进上下文既浪费，又容易把标签当内容读。
+            const htmlToText = (raw) => String(raw || '')
+              .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+              .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+              .replace(/<[^>]+>/g, ' ')
+              .replace(/&nbsp;/g, ' ').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+              .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&')
+              .replace(/\s+/g, ' ')
+              .trim();
+            const items = feeds.slice(0, count).map((f) => ({
+              nickname: String(f?.nickname || f?.name || '').slice(0, 40),
+              content: htmlToText(f?.html || f?.content || f?.summary).slice(0, 400),
+              createdTime: Number(f?.time || f?.created_time || f?.abstime) || 0,
+              appid: Number(f?.appid) || 0
+            }));
+            sendJson({ ok: true, hasMore: !!res.data?.has_more, items });
+          } catch (error) {
+            sendJson({ ok: false, error: `读取动态异常：${error?.message ?? error}` }, 502);
+          }
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/qzone/publish') {
+          const body = await readBody();
+          const key = String(body.key ?? '').trim();
+          const content = String(body.content ?? '').trim();
+          const token = String(body.token ?? req.headers['x-agent-token'] ?? '').trim();
+          if (!key) { sendJson({ ok: false, error: 'key 不能为空' }, 400); return; }
+          if (!agentTokenOk(key, token)) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
+          if (currentMode === 'reserved2' && !v2ToolEnabled('qzone')) {
+            sendJson({ ok: false, error: '工具未启用：qq_qzone_publish' }, 403); return;
+          }
+          if (!content) { sendJson({ ok: false, error: 'content 不能为空' }, 400); return; }
+          const qc = cfg.socialV2?.qzone || {};
+          const maxChars = Math.min(500, Math.max(20, Number(qc.maxChars) || 300));
+          if ([...content].length > maxChars) {
+            sendJson({ ok: false, error: `说说太长（上限 ${maxChars} 字）` }, 400); return;
+          }
+          const maxPerDay = Math.max(0, Number(qc.maxPerDay ?? 1));
+          const nowMs = Date.now();
+          const prev = (qzonePublishLog.get(key) || []).filter((t) => nowMs - t < 24 * 3600e3);
+          if (prev.length >= maxPerDay) {
+            sendJson({ ok: false, error: `今天已经发过 ${prev.length} 条了（上限 ${maxPerDay} 条/天），明天再说` }, 429); return;
+          }
+          const ugcRight = Number(body.ugcRight ?? qc.ugcRight ?? 1);
+          if (![1, 4, 16, 64, 128].includes(ugcRight)) {
+            sendJson({ ok: false, error: 'ugcRight 只能是 1/4/16/64/128' }, 400); return;
+          }
+          if ((ugcRight === 16 || ugcRight === 128) && !Array.isArray(body.targetUins)) {
+            sendJson({ ok: false, error: 'ugcRight 为 16/128 时必须给 targetUins' }, 400); return;
+          }
+          try {
+            const params = { content, ugc_right: ugcRight };
+            if (Array.isArray(body.targetUins) && body.targetUins.length) {
+              params.target_uins = body.targetUins.map(Number).filter((n) => Number.isFinite(n) && n > 0);
+            }
+            const res = await bot.request('send_qzone_msg', params);
+            if (!res || res.status !== 'ok' || res.retcode !== 0) {
+              sendJson({ ok: false, error: `发说说失败：${res?.wording || res?.retcode || 'unknown'}` }, 502); return;
+            }
+            prev.push(nowMs);
+            qzonePublishLog.set(key, prev);
+            const tid = String(res.data?.tid || res.data?.id || '');
+            // 记全内容 —— 说说一旦发出去就长期可见，事后要能核对、能删。
+            log(`QQ空间发说说（来自 ${key}，可见性 ${ugcRight}，tid=${tid || '?'}）：${content.slice(0, 60)}${content.length > 60 ? '…' : ''}`);
+            sendJson({ ok: true, tid, ugcRight, usedToday: prev.length, maxPerDay, reason: String(body.reason || '').slice(0, 120) });
+          } catch (error) {
+            sendJson({ ok: false, error: `发说说异常：${error?.message ?? error}` }, 502);
+          }
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/qzone/delete') {
+          const body = await readBody();
+          const key = String(body.key ?? '').trim();
+          const tid = String(body.tid ?? '').trim();
+          const token = String(body.token ?? req.headers['x-agent-token'] ?? '').trim();
+          if (!key || !tid) { sendJson({ ok: false, error: 'key 和 tid 不能为空' }, 400); return; }
+          if (!agentTokenOk(key, token)) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
+          try {
+            const res = await bot.request('delete_qzone_msg', { tid });
+            if (!res || res.status !== 'ok' || res.retcode !== 0) {
+              sendJson({ ok: false, error: `删除失败：${res?.wording || res?.retcode || 'unknown'}` }, 502); return;
+            }
+            log(`QQ空间删除说说（tid=${tid}，来自 ${key}）`);
+            sendJson({ ok: true, tid });
+          } catch (error) {
+            sendJson({ ok: false, error: `删除异常：${error?.message ?? error}` }, 502);
+          }
+          return;
+        }
         // ── 情绪（本地新增，2026-10-25）─────────────────────────────────
         if (req.method === 'GET' && url.pathname === '/api/socialV2/mood') {
           const key = String(url.searchParams.get('key') ?? '').trim();
@@ -7655,6 +7810,8 @@ async function main() {
   const lastSendFailed = new Map(); // key -> true（下一次成功即清除）
   // 受控转达的配额：调用方 key -> [最近一小时的时间戳]（本地改动 2026-10-25）
   const relaySendLog = new Map();
+  // QQ 空间发说说的每日配额：调用方 key -> [最近 24 小时的时间戳]（本地改动 2026-10-26）
+  const qzonePublishLog = new Map();
 
   function sendToQQ(key, msg) {
     const assertSendAllowed = captureSendGuard(key);

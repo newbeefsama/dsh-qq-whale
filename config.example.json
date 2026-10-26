@@ -287,6 +287,12 @@
       "activeTopicMaxAgeHours": 6,
       "activeTopicMaxAgeHighHours": 72,
       "activeTopicInjectMax": 10
+    },
+    "qzone": {
+      "enabled": true,
+      "maxPerDay": 1,
+      "ugcRight": 1,
+      "maxChars": 300
     }
   },
   "webSearch": {

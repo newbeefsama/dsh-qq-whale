@@ -146,6 +146,17 @@ Copy-Item config.example.json 你的工作区\qq-bridge\config.json
 | `biasOverallHalfLifeMinutes` | `45` | 会话偏移的总心情半衰期 |
 | `biasValueHalfLifeMinutes` | `30` | 会话偏移的单根情绪半衰期 |
 
+**QQ 空间** `socialV2.qzone`
+
+| 参数 | 默认 | 作用 |
+|---|---|---|
+| `enabled` | `true` | 是否注册空间工具 |
+| `maxPerDay` | `1` | 每天最多发几条说说 |
+| `ugcRight` | `1` | 默认可见性：1=所有人 4=好友 16=部分好友 64=仅自己 128=部分不可见 |
+| `maxChars` | `300` | 单条字数上限 |
+
+> 说说一旦发出去就长期可见，所以默认每天只给 1 条。想更活跃再调大。
+
 **上下文轮换** `socialV2.rotate`
 
 | 参数 | 默认 | 作用 |
