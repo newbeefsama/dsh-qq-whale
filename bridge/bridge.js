@@ -791,6 +791,12 @@ function loadConfig() {
         ugcRight: 1,
         maxChars: 300
       },
+      // ── 好友申请（本地改动 2026-10-26）──
+      friend: {
+        // 自动加入私聊白名单的**名额上限**（owner 不算）。
+        // 满了之后仍可同意好友，但不再自动加白名单 —— 由操作者手动决定。
+        autoWhitelistMax: 10
+      },
       // ── 上下文轮换 ──
       rotate: {
         turns: 25,                   // 跑多少轮换新会话（实测 38 轮开始卡死）
@@ -817,6 +823,7 @@ function loadConfig() {
         memory: true,
         mood: true,               // 情绪系统（本地新增 2026-10-25）
         qzone: true,              // QQ 空间（本地新增 2026-10-26）
+        friend: true,             // 好友申请判断（本地新增 2026-10-26）
         relay: true,              // 受控转达（本地新增 2026-10-25）
         watchVideo: true,         // 看视频（本地新增 2026-10-25）
         getImages: true,
@@ -944,6 +951,7 @@ function loadConfig() {
     memory: true,
     mood: true,               // 情绪系统（本地新增 2026-10-25）
     qzone: true,              // QQ 空间（本地新增 2026-10-26）
+    friend: true,             // 好友申请判断（本地新增 2026-10-26）
     relay: true,              // 受控转达（本地新增 2026-10-25）
     watchVideo: true,         // 看视频（本地新增 2026-10-25）
     slangQuery: true,
@@ -3661,6 +3669,8 @@ async function main() {
             // 每条 qzone 路由自己都用 agentTokenOk(key, token) 校验会话归属，
             // 所以放进白名单不会变成「任意会话都能动任意空间」。
             || url.pathname.startsWith('/api/qzone/')
+            // 好友申请（本地改动 2026-10-26）：列表 + 同意/拒绝。各自仍校验 agentTokenOk。
+            || url.pathname.startsWith('/api/friend/')
             || url.pathname === '/api/authorize/read';
           if (!agentAllowed) {
             sendJson({ ok: false, error: '该接口仅控制台可用' }, 403);
@@ -6961,6 +6971,68 @@ async function main() {
           }
           return;
         }
+        // ── 好友申请（本地改动 2026-10-26）──────────────────────────────
+        //
+        // 这两个接口把「同意好友」的决定权交给 AI：它先看列表（谁申请、验证消息、
+        // 是不是群友、记忆里有没有这个人），再决定同意还是拒绝。
+        // 同意后由桥接自动把人加进私聊白名单，带「自动名额」上限（默认 10）。
+        if (req.method === 'GET' && url.pathname === '/api/friend/requests') {
+          if (req.headers['x-agent-token'] && !isLiveAgentToken(req.headers['x-agent-token'])) {
+            sendJson({ ok: false, error: '未授权：会话令牌无效' }, 403); return;
+          }
+          const list = loadFriendRequests();
+          const ownerId = Number(cfg.ownerQQ) || 0;
+          const wl = Array.isArray(cfg.allow?.private) ? cfg.allow.private.map(Number) : [];
+          const autoMax = Math.max(0, Number(cfg.socialV2?.friend?.autoWhitelistMax ?? 10));
+          const autoCount = wl.filter((n) => n !== ownerId).length;
+          sendJson({
+            ok: true,
+            count: list.length,
+            autoWhitelist: { used: autoCount, max: autoMax, full: autoCount >= autoMax },
+            items: list.map((r) => ({
+              flag: r.flag,
+              userId: r.userId,
+              comment: r.comment,
+              minutesAgo: Math.round((Date.now() - (Number(r.time) || 0)) / 60000)
+            }))
+          });
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/friend/approve') {
+          const body = await readBody();
+          const key = String(body.key ?? '').trim();
+          const flag = String(body.flag ?? '').trim();
+          const token = String(body.token ?? req.headers['x-agent-token'] ?? '').trim();
+          if (!key || !flag) { sendJson({ ok: false, error: 'key 和 flag 不能为空' }, 400); return; }
+          if (!agentTokenOk(key, token)) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
+          if (currentMode === 'reserved2' && !v2ToolEnabled('friend')) {
+            sendJson({ ok: false, error: '工具未启用：qq_accept_friend' }, 403); return;
+          }
+          const approve = body.approve !== false;
+          const list = loadFriendRequests();
+          const target = list.find((r) => r.flag === flag);
+          if (!target) { sendJson({ ok: false, error: '这个申请不存在或已过期（flag 只在一定时间内有效）' }, 404); return; }
+          try {
+            const res = await bot.request('set_friend_add_request', { flag, approve });
+            if (!res || res.status !== 'ok' || res.retcode !== 0) {
+              sendJson({ ok: false, error: `处理好友申请失败：${res?.wording || res?.retcode || 'unknown'}` }, 502); return;
+            }
+            saveFriendRequests(list.filter((r) => r.flag !== flag));
+            let whitelist = null;
+            if (approve) {
+              whitelist = addToPrivateWhitelistAuto(target.userId);
+              if (whitelist.full) {
+                log(`好友 ${target.userId} 已同意，但白名单自动名额满了（${whitelist.autoCount}/${whitelist.autoMax}）—— 只加好友，未加白名单`);
+              }
+            }
+            log(`好友申请 ${approve ? '已同意' : '已拒绝'}：${target.userId}${body.reason ? `（理由：${String(body.reason).slice(0, 40)}）` : ''}`);
+            sendJson({ ok: true, approve, userId: target.userId, whitelist });
+          } catch (error) {
+            sendJson({ ok: false, error: `处理好友申请异常：${error?.message ?? error}` }, 502);
+          }
+          return;
+        }
+
         // ── QQ 空间（本地新增，2026-10-26）──────────────────────────────
         //
         // 协议层由 SnowLuma 的 OneBot 实现提供（get_qzone_msg_list / get_qzone_feeds /
@@ -7860,6 +7932,91 @@ async function main() {
   const relaySendLog = new Map();
   // QQ 空间发说说的每日配额：调用方 key -> [最近 24 小时的时间戳]（本地改动 2026-10-26）
   const qzonePublishLog = new Map();
+
+  // ── 好友申请队列（本地改动 2026-10-26）───────────────────────────────
+  //
+  // 为什么不沿用 friend-accept.cjs 的「一律同意」：那是个无差别门童 ——
+  // 谁加都进白名单，AI 完全没参与。操作者要的是「他自己判断喜不喜欢这个人」。
+  //
+  // 关键约束：QQ 的好友申请是**事件、不是查询**（有 set_friend_add_request，
+  // 没有 get_friend_add_request）。事件只推一次，错过就补不回来。
+  // 所以：收到就落盘 → 私聊通知 owner → 等 AI 下次唤醒时判断。
+  // 落盘而不只放内存，是因为判断发生在「下一次唤醒」，中间可能隔几分钟甚至一次重启。
+  const FRIEND_REQ_FILE = path.join(STATE_DIR, 'friend-requests.json');
+  const FRIEND_REQ_MAX = 20;
+  const FRIEND_REQ_TTL_MS = 24 * 3600e3;
+
+  function loadFriendRequests() {
+    try {
+      if (!fs.existsSync(FRIEND_REQ_FILE)) return [];
+      const raw = JSON.parse(fs.readFileSync(FRIEND_REQ_FILE, 'utf8').replace(/^\uFEFF/, ''));
+      const arr = Array.isArray(raw) ? raw : [];
+      const now = Date.now();
+      return arr.filter((r) => r && r.flag && now - (Number(r.time) || 0) < FRIEND_REQ_TTL_MS);
+    } catch {
+      return [];
+    }
+  }
+
+  function saveFriendRequests(list) {
+    try {
+      atomicWriteJson(FRIEND_REQ_FILE, Array.isArray(list) ? list.slice(-FRIEND_REQ_MAX) : []);
+    } catch (error) {
+      log(`保存好友申请队列失败：${error?.message ?? error}`);
+    }
+  }
+
+  /** 收到好友申请：入队 + 落盘 + 通知 owner（不自动同意）。 */
+  function queueFriendRequest(event) {
+    try {
+      const flag = String(event?.flag ?? '').trim();
+      const userId = String(event?.user_id ?? '').trim();
+      if (!flag || !userId) return;
+      const list = loadFriendRequests();
+      if (list.some((r) => r.flag === flag)) return;
+      list.push({
+        flag,
+        userId,
+        comment: String(event?.comment ?? '').trim().slice(0, 200),
+        time: Date.now()
+      });
+      saveFriendRequests(list);
+      log(`收到好友申请：${userId}（验证消息：${String(event?.comment ?? '').slice(0, 40) || '无'}）—— 等 AI 判断，不自动同意`);
+      const owner = String(cfg.ownerQQ ?? '');
+      if (owner) {
+        void sendToQQ(`private:${owner}`, `有人申请加好友：${userId}\n验证消息：${String(event?.comment ?? '').trim() || '（无）'}\n待处理 ${list.length} 条 —— 等她自己判断。`).catch(() => {});
+      }
+    } catch (error) {
+      log(`好友申请入队失败：${error?.message ?? error}`);
+    }
+  }
+
+  /** 把某人加进私聊白名单（带「自动加入」名额上限）。 */
+  function addToPrivateWhitelistAuto(userId) {
+    const id = Number(userId);
+    if (!Number.isFinite(id) || id <= 0) return { ok: false, error: 'QQ 号无效' };
+    const list = Array.isArray(cfg.allow?.private) ? cfg.allow.private.map(Number) : [];
+    if (list.includes(id)) return { ok: true, count: list.length, already: true };
+    const ownerId = Number(cfg.ownerQQ) || 0;
+    const autoMax = Math.max(0, Number(cfg.socialV2?.friend?.autoWhitelistMax ?? 10));
+    const autoCount = list.filter((n) => n !== ownerId).length;
+    if (autoCount >= autoMax) {
+      return { ok: false, full: true, count: list.length, autoCount, autoMax };
+    }
+    try {
+      const configFile = path.join(ROOT, 'config.json');
+      const file = readConfigObject(configFile);
+      const nextPrivate = [...list, id];
+      const nextGroups = Array.isArray(cfg.allow?.groups) ? cfg.allow.groups : [];
+      file.allow = { private: nextPrivate, groups: nextGroups };
+      atomicWriteJson(configFile, file);
+      cfg.allow = { private: nextPrivate, groups: nextGroups };
+      log(`好友白名单自动加入 ${id}（自动名额 ${autoCount + 1}/${autoMax}）`);
+      return { ok: true, count: nextPrivate.length, autoCount: autoCount + 1, autoMax };
+    } catch (error) {
+      return { ok: false, error: String(error?.message ?? error) };
+    }
+  }
 
   function sendToQQ(key, msg) {
     const assertSendAllowed = captureSendGuard(key);
@@ -13049,6 +13206,11 @@ async function main() {
       noteUpstreamPacket(post
         ? `${post}${event.notice_type ? `/${event.notice_type}` : ''}${event.meta_event_type ? `/${event.meta_event_type}` : ''}${event.message_type ? `/${event.message_type}` : ''}`
         : 'event');
+      // 好友申请（本地改动 2026-10-26）：入队等 AI 判断，不自动同意。
+      if (post === 'request' && event?.request_type === 'friend') {
+        queueFriendRequest(event);
+        return;
+      }
       if (post === 'meta_event' && event?.meta_event_type === 'heartbeat') {
         // status 未在 SDK 类型里声明（OneBotMetaEvent 只声明 meta_event_type），
         // 但 OneBotBaseEvent 是 JsonObject，读取合法。

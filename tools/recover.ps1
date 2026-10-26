@@ -9,7 +9,7 @@
 
 $ErrorActionPreference = 'Continue'
 
-$root  = 'C:\path\to\deepseek-harness\default-workspace\qq群聊助手'
+$root  = 'C:\Users\<你>\Documents\deepseek-harness\default-workspace\qq群聊助手'
 $tools = Join-Path $root '_工具'
 $snow  = Join-Path $root 'SnowLuma'
 $tulpa = Join-Path $root 'Tulpa'
@@ -45,7 +45,7 @@ function PortUp($port) {
 function NoteSnowLumaHookState {
   try {
     $pwFile = Join-Path $tools '_snow-webui-pw.txt'
-    $pw = '__你的WebUI密码__'
+    $pw = 'Whale2026QQ'
     if (Test-Path $pwFile) {
       $saved = (Get-Content $pwFile -Raw -Encoding UTF8).Trim()
       if ($saved) { $pw = $saved }
@@ -122,7 +122,7 @@ if (Test-Path $dshFlag) {
 #      里写死了 baseUrl。不跟着改，DSH 一重启桥接就连不上，而且它自己不会改。
 #   2. 桥接进程崩了没人管（我是用 Start-Process 裸起的，没有守护）。
 #      这里改用 start.bat 的守护循环（崩溃 5 秒自启），经 VBS 无窗拉起。
-$bridgeDir = 'C:\path\to\deepseek-harness\default-workspace\qq-bridge'
+$bridgeDir = 'C:\Users\<你>\Documents\deepseek-harness\default-workspace\qq-bridge'
 $bridgeCfg = Join-Path $bridgeDir 'config.json'
 
 # --- 1. 让 baseUrl 跟随 DSH 实际端口 ---
@@ -208,23 +208,12 @@ if (-not $dshPort) {
   } catch { Note ("  桥接拉起失败: " + $_.Exception.Message) }
 }
 
-# ---------- 自动加好友 ----------
-# QQ 好友申请是事件、不是查询（有 set_friend_add_request，没有 get_friend_add_request），
-# 所以必须常驻挂 WS 接；错过就再也补不回来。
-# 策略：好友申请一律同意，然后私聊告诉 owner 加了谁；群邀请只记录不处理。
-$fa = Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue |
-  Where-Object { $_.CommandLine -like '*friend-accept.cjs*' }
-if (-not $fa) {
-  Note '自动加好友不在，拉起'
-  try {
-    Start-Process -FilePath 'D:\Node.js\node.exe' `
-      -ArgumentList (Join-Path $tools 'friend-accept.cjs') `
-      -WorkingDirectory $tools `
-      -WindowStyle Hidden
-    Note '  自动加好友已拉起'
-  } catch { Note ("  自动加好友拉起失败: " + $_.Exception.Message) }
-}
-
+# ---------- 自动加好友（2026-10-26 起停用）----------
+# 原来这里常驻拉起 friend-accept.cjs，策略是「好友申请一律同意 + 无条件加白名单」——
+# 那是个无差别门童，AI 完全没参与。现在改成桥接内建：收到申请先落盘、私聊通知 owner，
+# 等 AI 下次唤醒时用 qq_friend_requests / qq_accept_friend 自己判断。
+# 所以这里不再拉起任何脚本。若你手动跑过 friend-accept.cjs，记得关掉它，
+# 否则它会和桥接抢同一批事件、抢先自动同意。
 # ---------- 戳一戳实时监听：已停用 ----------
 # 2026-10-22 停用 poke-live.cjs。原因：它的逻辑是「被戳 → 戳回去，不插话」，
 # 那是早期没有桥接时的应急方案。现在桥接自己处理 poke 事件并唤醒 AI 说话，

@@ -157,6 +157,14 @@ Copy-Item config.example.json 你的工作区\qq-bridge\config.json
 
 > 说说一旦发出去就长期可见，所以默认每天只给 1 条。想更活跃再调大。
 
+**好友申请** `socialV2.friend`
+
+| 参数 | 默认 | 作用 |
+|---|---|---|
+| `autoWhitelistMax` | `10` | 自动加入私聊白名单的名额上限（操作者手动加的不算） |
+
+> 名额满了之后仍可同意好友，但不再自动加白名单。
+
 **上下文轮换** `socialV2.rotate`
 
 | 参数 | 默认 | 作用 |

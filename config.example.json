@@ -293,6 +293,9 @@
       "maxPerDay": 1,
       "ugcRight": 1,
       "maxChars": 300
+    },
+    "friend": {
+      "autoWhitelistMax": 10
     }
   },
   "webSearch": {

@@ -334,6 +334,8 @@ const TOOL_CONFIG_FLAGS = {
   qq_qzone_list: 'qzone',      // QQ 空间：列说说（2026-10-26 加）
   qq_qzone_publish: 'qzone',   // QQ 空间：发说说（2026-10-26 加）
   qq_qzone_delete: 'qzone',    // QQ 空间：删说说（2026-10-26 加）
+  qq_friend_requests: 'friend', // 好友申请：看待处理（2026-10-26 加）
+  qq_accept_friend: 'friend',   // 好友申请：同意/拒绝（2026-10-26 加）
   qq_slang_query: 'slangQuery',
   qq_slang_submit: 'slangSubmit',
   qq_send_voice: 'sendVoice',
@@ -1037,6 +1039,40 @@ server.tool(
       return { content: [{ type: 'text', text: serializeModelData(data) }] };
     } catch (error) {
       return { content: [{ type: 'text', text: `转达失败：${error?.message ?? error}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
+  'qq_friend_requests',
+  '查看待处理的好友申请（只读）。\n【为什么要你判断】QQ 的好友申请是**一次性事件**，看过就没了；而这个号的白名单决定「谁能私聊你」。所以同意谁由你决定，不是无差别放行。\n【怎么判断】看三样：① 验证消息写了什么（有诚意的、点名找你的，优先）；② 他是不是你群里的人（可以先用 qq_get_group_members 查）；③ 你记忆里有没有这个人（qq_memory_query）。\n【倾向】宁缺勿滥。不认识、没在群里见过、验证消息是空白的，可以拒绝。真正想聊的人再加进来。另外注意 autoWhitelist 那个字段：满了之后就算同意好友，也不会自动进白名单。',
+  { key: z.string().describe('会话 key（格式 group:群号 或 private:QQ号）'), token: z.string().optional().describe('会话令牌') },
+  async ({ key, token }) => {
+    try {
+      const data = await agentApi('/api/friend/requests', { headers: token ? { 'x-agent-token': token } : {} });
+      return { content: [{ type: 'text', text: serializeModelData(data) }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `读取好友申请失败：${error?.message ?? error}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
+  'qq_accept_friend',
+  '同意或拒绝一条好友申请（有副作用）。flag 从 qq_friend_requests 的返回里取，只能用一次。\n同意 → 对方成为好友，并且**会自动加进私聊白名单**（如果还有自动名额，见 autoWhitelist）。加进白名单意味着他能私聊你、你会回他。\n拒绝 → 对方收不到你就此事的消息。\n同一个 flag 只能处理一次；处理过的会从列表里消失。',
+  {
+    key: z.string().describe('会话 key'),
+    token: z.string().optional().describe('会话令牌'),
+    flag: z.string().describe('申请的 flag（来自 qq_friend_requests）'),
+    approve: z.boolean().describe('true=同意，false=拒绝'),
+    reason: z.string().optional().describe('为什么同意/拒绝（一句话，写给自己看的，不发出去）')
+  },
+  async ({ key, token, flag, approve, reason }) => {
+    try {
+      const data = await agentApi('/api/friend/approve', { method: 'POST', body: JSON.stringify({ key, token, flag, approve, reason }), headers: token ? { 'x-agent-token': token } : {} });
+      return { content: [{ type: 'text', text: serializeModelData(data) }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `处理好友申请失败：${error?.message ?? error}` }], isError: true };
     }
   }
 );
