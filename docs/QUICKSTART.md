@@ -125,6 +125,15 @@ Copy-Item config.example.json 你的工作区\qq-bridge\config.json
 | `pruneWeight` | `0.03` | 权重低于这个才真删。**调 0 = 永不删除**（只降权重不清理） |
 | `maxEntries` | `40` | 话题上限，超了挤掉权重最低的 |
 | `reviveMinGrams` | `2` | 被重新提起的判定阈值：几个 3 字片段同时命中才算 |
+| `activeTopicMaxAgeHours` | `6` | **「进行中话题」的新鲜度上限**。超过就不当「正在聊」注入了 |
+| `activeTopicMaxAgeHighHours` | `72` | 重要度 ≥4（约定、欠账）放宽到的上限 |
+| `activeTopicInjectMax` | `10` | 每次最多注入几条进行中话题 |
+
+
+> **为什么需要 `activeTopicMaxAgeHours`：** 只按权重排序时，权重半衰期是 14 天 ——
+> 20 小时前的话题权重还有 0.96，等于永远「正在进行」。实测群里 12 条进行中话题
+> 有 11 条是同一个人的旧账、最久的 20 小时前，它每次接话都从老账里捞素材，
+> 群友看到的就是「前言不搭后语」。这道闸只影响**注入**，不删状态。
 
 **心情** `socialV2.mood`
 

@@ -763,7 +763,14 @@ function loadConfig() {
         halfLifeDays: { 1: 2, 2: 7, 3: 14, 4: 30, 5: 90 },
         pruneWeight: 0.03,     // 权重低于这个才真删；调 0 = 永不删除（只降权重不清理）
         maxEntries: 40,        // 话题上限，超了挤掉权重最低的
-        reviveMinGrams: 2      // 被重新提起的判定：至少几个 3 字片段同时命中
+        reviveMinGrams: 2,     // 被重新提起的判定：至少几个 3 字片段同时命中
+        // 「进行中话题」的新鲜度上限（小时，本地改动 2026-10-26）。
+        // 超过就不再当「正在聊的事」注入 —— 只影响注入，不删状态。
+        // 没这道闸时，14 天半衰期让 20 小时前的话题权重还有 0.96，
+        // 于是它每次都从老账里捞素材，群友看着就是「前言不搭后语」。
+        activeTopicMaxAgeHours: 6,
+        activeTopicMaxAgeHighHours: 72,  // 重要度 ≥4（约定、欠账）留久一点
+        activeTopicInjectMax: 10
       },
       // ── 心情 ──
       mood: {
@@ -2978,6 +2985,12 @@ async function main() {
       rememberAgentToken(key, st.agentToken);
       st.bootstrapSent = false;
       st.modelSeenSeqs = new Set();
+      // 轮数清零必须在**退役时就做**，不能只放在「交接摘要注入」那一处。
+      // 实测（2026-10-26）：控制台 /api/console/notify-ai 走的是另一条提示词路径，
+      // 不会注入 handoffText、也就不会把它清零 —— 于是 turnCount 一直停在阈值上，
+      // 下一次 ensureSession 又判定「该轮换」，一次通知连换三个会话。
+      // 正常 QQ 唤醒会命中摘要注入那条路，所以这个 bug 只在控制台操作时暴露。
+      st.turnCount = 0;
     }
     saveState();
     saveSocialV2State();
@@ -9571,7 +9584,21 @@ async function main() {
     halfLifeDays: { 1: 2, 2: 7, 3: 14, 4: 30, 5: 90 },
     pruneWeight: 0.03,
     maxEntries: 40,
-    reviveMinGrams: 2
+    reviveMinGrams: 2,
+    // 「进行中话题」的新鲜度上限（本地改动 2026-10-26）。
+    //
+    // 踩过的坑：一开始只按「权重」排序注入，而权重半衰期是 14 天 ——
+    // 结果 20 小时前的话题权重还有 0.96，等于永远「正在进行」。
+    // 实测群会话的 12 条进行中话题里有 11 条是同一个 bot 的旧账，
+    // 最久的 20 小时前；它每次接话都从这些老账里捞素材，
+    // 群友看到的就是「前言不搭后语」。
+    //
+    // 区分两件事：长期记忆该慢慢淡（半衰期几天），
+    // 但「正在聊的事」不该活过一顿饭 —— 所以单独加一道新鲜度闸。
+    // 超龄话题只是**不再注入**，状态不删；哪天被重新提起还会回来。
+    activeTopicMaxAgeHours: 6,
+    activeTopicMaxAgeHighHours: 72,   // 重要度 ≥4 的（约定、欠账）留久一点
+    activeTopicInjectMax: 10
   };
   function memoryCfg() {
     const c = (cfg.socialV2 && cfg.socialV2.memory) || {};
@@ -9589,7 +9616,10 @@ async function main() {
       halfLifeDays,
       pruneWeight: num(c.pruneWeight, MEM_DEFAULTS.pruneWeight, 0, 1),
       maxEntries: Math.round(num(c.maxEntries, MEM_DEFAULTS.maxEntries, 5, 500)),
-      reviveMinGrams: Math.round(num(c.reviveMinGrams, MEM_DEFAULTS.reviveMinGrams, 1, 6))
+      reviveMinGrams: Math.round(num(c.reviveMinGrams, MEM_DEFAULTS.reviveMinGrams, 1, 6)),
+      activeTopicMaxAgeHours: num(c.activeTopicMaxAgeHours, MEM_DEFAULTS.activeTopicMaxAgeHours, 0.5, 24 * 30),
+      activeTopicMaxAgeHighHours: num(c.activeTopicMaxAgeHighHours, MEM_DEFAULTS.activeTopicMaxAgeHighHours, 0.5, 24 * 90),
+      activeTopicInjectMax: Math.round(num(c.activeTopicInjectMax, MEM_DEFAULTS.activeTopicInjectMax, 3, 40))
     };
   }
 
@@ -9674,7 +9704,18 @@ async function main() {
     if (!st) return '';
     const lines = [];
     const now = Date.now();
-    const topics = Array.isArray(st.activeTopics) ? st.activeTopics.filter((t) => t && t.text) : [];
+    const mc = memoryCfg();
+    const allTopics = Array.isArray(st.activeTopics) ? st.activeTopics.filter((t) => t && t.text) : [];
+    // 新鲜度闸：超过 activeTopicMaxAgeHours 的话题不再算「进行中」
+    // （重要度 ≥4 的放宽到 activeTopicMaxAgeHighHours）。状态不删，只不注入。
+    const topics = allTopics.filter((t) => {
+      const touched = Number(t.lastTouchedAt) || Number(t.lastMentionAt) || Number(t.createdAt) || 0;
+      if (!touched) return true;
+      const ageHours = (now - touched) / 3600e3;
+      const limit = memoryImportance(t) >= 4 ? mc.activeTopicMaxAgeHighHours : mc.activeTopicMaxAgeHours;
+      return ageHours <= limit;
+    });
+    const staleCount = allTopics.length - topics.length;
     if (topics.length) {
       lines.push('【进行中的话题】');
       // 按「权重」排序而不是按时间：越重要/越新鲜的越靠前，
@@ -9682,13 +9723,14 @@ async function main() {
       const ranked = [...topics]
         .map((t) => ({ t, w: memoryWeight(t, now) }))
         .sort((a, b) => b.w - a.w)
-        .slice(0, 14);
+        .slice(0, mc.activeTopicInjectMax);
       for (const { t, w } of ranked) {
         const ago = t.lastMentionAt ? Math.round((now - t.lastMentionAt) / 60000) : 0;
         const aging = w < 0.35 ? `（记不太清了，权重 ${w.toFixed(2)}）` : '';
         const imp = memoryImportance(t) >= 4 ? '★' : '';
         lines.push(`- ${imp}${t.text}${aging}（${ago > 0 ? ago + '分钟前' : '刚刚'}）${t.pendingQuestion ? `；待追问：${t.pendingQuestion}` : ''}`);
       }
+      if (staleCount > 0) lines.push(`（另有 ${staleCount} 条更早的话题已折叠，需要时用 qq_memory_query 查）`);
     }
     const thoughts = Array.isArray(st.pendingThoughts) ? st.pendingThoughts.filter((t) => t && t.text && (!t.expiresAt || Date.now() < t.expiresAt)) : [];
     if (thoughts.length) {
