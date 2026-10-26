@@ -613,8 +613,12 @@ if (-not $isAdmin) {
 
       $triggers = if ($trgEvent) { @($trgTime, $trgEvent) } else { @($trgTime) }
       $principal = New-ScheduledTaskPrincipal -UserId "$env:USERNAME" -LogonType Interactive -RunLevel Highest
+      # MultipleInstances 用 Parallel 而不是 IgnoreNew —— 这是实测教训：
+      # 机器休眠时进程被杀，但任务状态可能仍停在 Running；IgnoreNew 会让之后
+      # 每一次触发器都被忽略，看护永远起不来（2026-10-26 掉线 13 小时后发现的）。
+      # watchdog.ps1 自己有单实例检查（会清掉重复的），所以 Parallel 是安全的。
       $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
-        -StartWhenAvailable -MultipleInstances IgnoreNew
+        -StartWhenAvailable -MultipleInstances Parallel -ExecutionTimeLimit ([TimeSpan]::Zero)
 
       Register-ScheduledTask -TaskName 'BotAutoRecover' -Action $action -Trigger $triggers `
         -Principal $principal -Settings $settings -Force -ErrorAction Stop | Out-Null
