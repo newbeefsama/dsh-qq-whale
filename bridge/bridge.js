@@ -791,6 +791,17 @@ function loadConfig() {
         ugcRight: 1,
         maxChars: 300
       },
+      // ── 记忆（本地改动 2026-10-27）：语义检索用本地 ollama ──
+      memory: {
+        // 打开后：记忆的「重新提起」和「相关旧记忆」都用向量相似度判定，
+        // 而不是 3 字片段字面匹配。ollama 不在时自动退回字面匹配，不会报错。
+        embedEnabled: true,
+        embedModel: 'bge-m3',
+        embedUrl: 'http://127.0.0.1:11434',
+        // 相似度门槛：0.60 是实测调的 —— bge-m3 下真正该想起的约 0.63~0.66，
+        // 无关话题最高约 0.53。取中间值两边都有余量。
+        embedMinSim: 0.6
+      },
       // ── 好友申请（本地改动 2026-10-26）──
       friend: {
         // 自动加入私聊白名单的**名额上限**（owner 不算）。
@@ -10034,6 +10045,145 @@ async function main() {
     return Number.isFinite(n) ? Math.max(1, Math.min(5, Math.round(n))) : 3;
   }
 
+  // ── 语义检索（本地 embedding，2026-10-27 加）─────────────────────────
+  //
+  // 起因：记忆检索原来是 3 字片段**字面**匹配。实测「碗我洗好了，你那份也别搁着」
+  // 对「白饭票梗：我发的票盖碗印…」是 **0 命中** —— 语义明明相关，
+  // 但只要用词不同就完全想不起来。记忆存着却想不起来，等于没存。
+  //
+  // 这里用本地 ollama 的 bge-m3 做向量相似度：
+  //   · 每条记忆的向量按文本哈希缓存并落盘（重启不用重算）
+  //   · 每次唤醒只算一次「最近消息」的向量（1 次 HTTP，约 20ms）
+  //   · ollama 不在/模型没拉 → 返回 null，调用方自动退回 3-gram（不炸）
+  const EMB_CACHE_FILE = path.join(STATE_DIR, 'emb-cache.json');
+  // 0.60 是实测调的：bge-m3 下真正该想起的约 0.63~0.66，无关话题最高约 0.53，
+  // 取中间值两边都留余量。
+  const EMB_DEFAULTS = { enabled: true, model: 'bge-m3', url: 'http://127.0.0.1:11434', minSim: 0.6 };
+  let embCache = null;
+  let embSaveTimer = null;
+  let embFailUntil = 0;
+  let embStats = { ok: 0, fail: 0, hit: 0 };
+
+  function embCfg() {
+    const c = cfg.socialV2?.memory || {};
+    const d = EMB_DEFAULTS;
+    return {
+      enabled: c.embedEnabled !== false,
+      model: String(c.embedModel || d.model),
+      url: String(c.embedUrl || d.url).replace(/\/+$/, ''),
+      minSim: Math.min(0.95, Math.max(0.3, Number(c.embedMinSim) || d.minSim))
+    };
+  }
+
+  function loadEmbCache() {
+    if (embCache) return embCache;
+    embCache = new Map();
+    try {
+      if (fs.existsSync(EMB_CACHE_FILE)) {
+        const raw = JSON.parse(fs.readFileSync(EMB_CACHE_FILE, 'utf8').replace(/^\uFEFF/, ''));
+        for (const [k, v] of Object.entries(raw || {})) {
+          if (Array.isArray(v) && v.length) embCache.set(k, v);
+        }
+      }
+    } catch { /* 缓存坏了从空开始，不影响功能 */ }
+    return embCache;
+  }
+
+  function scheduleSaveEmbCache() {
+    if (embSaveTimer) return;
+    embSaveTimer = setTimeout(() => {
+      embSaveTimer = null;
+      try {
+        const obj = {};
+        let n = 0;
+        for (const [k, v] of loadEmbCache()) {
+          obj[k] = v;
+          if (++n >= 500) break;   // 上限，避免文件无限长
+        }
+        atomicWriteJson(EMB_CACHE_FILE, obj);
+      } catch { /* 落盘失败不影响本次检索 */ }
+    }, 3000);
+    if (embSaveTimer.unref) embSaveTimer.unref();
+  }
+
+  function textHash(t) {
+    return crypto.createHash('sha1').update(String(t)).digest('hex').slice(0, 24);
+  }
+
+  /** 取文本向量。返回 null = 这条路不可用，调用方退回字面匹配。 */
+  async function embedText(text) {
+    const c = embCfg();
+    if (!c.enabled) return null;
+    if (Date.now() < embFailUntil) return null;
+    const t = String(text || '').trim().slice(0, 2000);
+    if (!t) return null;
+    const cache = loadEmbCache();
+    const h = textHash(t);
+    if (cache.has(h)) { embStats.hit += 1; return cache.get(h); }
+    try {
+      const res = await fetch(c.url + '/api/embed', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ model: c.model, input: t }),
+        signal: AbortSignal.timeout(10000)
+      });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const json = await res.json();
+      const vec = Array.isArray(json?.embeddings) ? json.embeddings[0] : null;
+      if (!Array.isArray(vec) || !vec.length) throw new Error('返回里没有向量');
+      cache.set(h, vec);
+      scheduleSaveEmbCache();
+      embStats.ok += 1;
+      return vec;
+    } catch (error) {
+      // 冷却 5 分钟：ollama 没起/没拉模型时，别每轮都干等 10 秒。
+      embFailUntil = Date.now() + 5 * 60e3;
+      embStats.fail += 1;
+      log('语义检索不可用（' + (error?.message ?? error) + '），本轮回退字面匹配');
+      return null;
+    }
+  }
+
+  function cosineSim(a, b) {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return 0;
+    let dot = 0, na = 0, nb = 0;
+    for (let i = 0; i < a.length; i += 1) {
+      dot += a[i] * b[i];
+      na += a[i] * a[i];
+      nb += b[i] * b[i];
+    }
+    if (!na || !nb) return 0;
+    return dot / Math.sqrt(na * nb);
+  }
+
+  /**
+   * 算「这批最近消息」和「每条记忆」的语义相似度。
+   * 返回 Map<记忆文本, 相似度>；不可用时 null（调用方退回 3-gram）。
+   */
+  async function memorySimilarities(st, messages) {
+    if (!st || !Array.isArray(st.activeTopics) || !st.activeTopics.length) return null;
+    if (!messages?.length) return null;
+    const blob = messages
+      .map((m) => String(m?.text || m?.plain || ''))
+      .join('\n')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 4000);
+    if (blob.length < 4) return null;
+    const blobVec = await embedText(blob);
+    if (!blobVec) return null;
+    const out = new Map();
+    for (const t of st.activeTopics) {
+      const text = String(t?.text || '').trim();
+      if (!text) continue;
+      const vec = await embedText(text.slice(0, 1200));
+      if (!vec) continue;
+      out.set(text, cosineSim(blobVec, vec));
+    }
+    return out.size ? out : null;
+  }
+
+
   function memoryWeight(entry, now = Date.now()) {
     const touched = Number(entry?.lastTouchedAt) || Number(entry?.lastMentionAt) || Number(entry?.createdAt) || 0;
     if (!touched) return 1;
@@ -10061,30 +10211,45 @@ async function main() {
    * 只要有 2 个以上不同片段出现在最近消息里，就算被提到。
    * 比关键词精确匹配宽松，又比整句匹配实用。
    */
-  function reviveMemoriesFromMessages(st, messages, now = Date.now()) {
+  function reviveMemoriesFromMessages(st, messages, now = Date.now(), sims = null) {
     if (!st || !Array.isArray(st.activeTopics) || !messages?.length) return 0;
     const blob = messages
       .map((m) => String(m?.text || m?.plain || ''))
       .join('\n')
       .replace(/\s+/g, '');
     if (!blob) return 0;
+    const minSim = embCfg().minSim;
     let revived = 0;
     for (const t of st.activeTopics) {
-      const text = String(t?.text || '').replace(/[\s，。！？、,.!?~～：:；;（）()「」【】"'"']/g, '');
-      if (text.length < 3) continue;
-      const grams = new Set();
-      for (let i = 0; i + 3 <= text.length; i += 1) grams.add(text.slice(i, i + 3));
-      const need = memoryCfg().reviveMinGrams;
-      let hit = 0;
-      for (const g of grams) {
-        if (blob.includes(g)) { hit += 1; if (hit >= need) break; }
+      // 有语义相似度就用语义判定（「碗我洗好了」也能想起白饭票），
+      // 没有就退回 3 字片段（ollama 没起时仍然能工作）。
+      let matched = false;
+      if (sims && sims.size) {
+        const sim = sims.get(String(t?.text || '').trim());
+        matched = Number.isFinite(sim) && sim >= minSim;
       }
-      if (hit >= need) {
+      if (!matched) {
+        const text = String(t?.text || '').replace(/[\s，。！？、,.!?~～：:；;（）()「」【】"'"']/g, '');
+        if (text.length >= 3) {
+          const grams = new Set();
+          for (let i = 0; i + 3 <= text.length; i += 1) grams.add(text.slice(i, i + 3));
+          const need = memoryCfg().reviveMinGrams;
+          let hit = 0;
+          for (const g of grams) {
+            if (blob.includes(g)) { hit += 1; if (hit >= need) break; }
+          }
+          matched = hit >= need;
+        }
+      }
+      if (matched) {
         const before = memoryWeight(t, now);
         t.lastTouchedAt = now;
         t.lastMentionAt = now;
         if (before < 0.5) revived += 1;   // 只统计「真的从低处弹回来」的
       }
+    }
+    if (revived > 0) {
+      log('[memory] 语义复活 ' + revived + ' 条记忆（相似度 ≥ ' + minSim + (sims ? '' : '，字面模式') + '）');
     }
     return revived;
   }
@@ -10106,7 +10271,7 @@ async function main() {
     return out;
   }
 
-  function formatMemoryV2(st, currentKey) {
+  function formatMemoryV2(st, currentKey, sims) {
     if (!st) return '';
     const lines = [];
     const now = Date.now();
@@ -10153,6 +10318,36 @@ async function main() {
         const im = impressions[name] || {};
         const traits = Array.isArray(im.traits) ? im.traits : [];
         lines.push(`- ${name}：${traits.length ? traits.join('、') : '暂无记录'}（互动 ${Number(im.interactionCount) || 0} 次）`);
+      }
+    }
+    // 语义相关的旧记忆（本地改动 2026-10-27）：
+    // 上面的列表是按「权重新鲜度」排的，跟「现在聊的事」无关 ——
+    // 一条三个月前但正说着的事，权重早就掉到看不见了。
+    // 这里单列一节：语义相似度够高、但没进上面列表的，补在这里。
+    if (sims && sims.size) {
+      const minSim = embCfg().minSim;
+      const shownTexts = new Set(topics.map((t) => String(t.text || '').trim()));
+      const related = [];
+      for (const t of allTopics) {
+        const key = String(t.text || '').trim();
+        if (!key || shownTexts.has(key)) continue;
+        const sim = sims.get(key);
+        if (!Number.isFinite(sim) || sim < minSim) continue;
+        related.push({ t, sim });
+      }
+      related.sort((a, b) => b.sim - a.sim);
+      if (related.length) {
+        // 打一行日志：这一节真的被注入了才打，平时不占日志。
+        // 没有这行就无法判断「语义检索到底有没有在起作用」。
+        log('[memory] 语义召回 ' + related.length + ' 条旧记忆（最高 ' + related[0].sim.toFixed(2) + '）：'
+          + related.slice(0, 2).map((r) => String(r.t.text).slice(0, 18)).join(' / '));
+        lines.push('【跟现在这事有关的旧记忆】');
+        for (const { t, sim } of related.slice(0, 3)) {
+          const agoMs = now - (Number(t.lastMentionAt) || Number(t.createdAt) || now);
+          const days = Math.floor(agoMs / 86400e3);
+          const when = days >= 1 ? days + ' 天前的事' : '不久前的';
+          lines.push('- ' + t.text + '（' + when + '·相关度 ' + sim.toFixed(2) + '）');
+        }
       }
     }
     // 跨会话共享记忆：把别的对话里记下的条目也拼进来（本地改动）
@@ -10493,7 +10688,7 @@ async function main() {
       // offline queue may have received more messages since this wake was queued.
       wakeState = getSocialV2State(key);
       wakeToken = wakeState.agentToken;
-      promptText = buildWakePromptV2(key, opts.wakeReason);
+      promptText = await buildWakePromptV2(key, opts.wakeReason);
       wakeSnapshot = buildWakeSnapshotV2(key);
       if (wakeSnapshot) {
         promptText += `\n\n【本次消息快照】\n${JSON.stringify(wakeSnapshot)}\n以上消息已提供，无需重复查询；partial=true 时用 qq_get_unread_messages(afterSeq=readThroughSeq) 继续读取。先处理当前消息；回复前如需确认后续补充，用 qq_wait_for_messages(purpose="reply") 补足短静默，已安静够久会立即返回，不要先长等。收尾只确认你已处理的 readThroughSeq（本地 seq，非 QQ messageId），传给 qq_mark_read 或 qq_set_wake_config 的 throughSeq；新到消息留待处理。`;
@@ -11626,19 +11821,27 @@ async function main() {
     }
   }
 
-  function buildWakePromptV2(key, reason) {
+  async function buildWakePromptV2(key, reason) {
     const roleState = readRoleState();
     const roleLine = roleState.role ? `【当前角色】${roleState.role}（完整角色卡请调用 qq_get_prompt 查看）\n\n` : '';
     const identityLine = selfIdentityTextV2();
     const st = getSocialV2State(key);
     const tokenLine = `【会话令牌】${st.agentToken}（调用二代状态工具时请在参数中带上此令牌）\n\n`;
     // 记忆半衰期：先从最近消息里把「被重新提起的」话题弹回满权重（本地改动 2026-10-25）
+    // 语义相似度（本地 embedding）：一次唤醒只算一次「最近消息」的向量，
+    // 每条记忆的向量走缓存。不可用时 sims=null，后面全退回 3-gram。
+    let sims = null;
+    try {
+      const recentForRevive0 = [...(Array.isArray(st.recentMessages) ? st.recentMessages.slice(-30) : []),
+        ...(Array.isArray(st.unread) ? st.unread : [])];
+      sims = await memorySimilarities(st, recentForRevive0);
+    } catch { sims = null; }
     try {
       const recentForRevive = [...(Array.isArray(st.recentMessages) ? st.recentMessages.slice(-30) : []),
         ...(Array.isArray(st.unread) ? st.unread : [])];
-      reviveMemoriesFromMessages(st, recentForRevive);
+      reviveMemoriesFromMessages(st, recentForRevive, Date.now(), sims);
     } catch { /* 复活失败不影响唤醒 */ }
-    const memoryText = formatMemoryV2(st, key);
+    const memoryText = formatMemoryV2(st, key, sims);
     const memoryLine = memoryText ? `${memoryText}\n\n` : '';
     // 情绪注入：薄薄几行 + 松绑声明，不改系统提示（本地改动 2026-10-25）
     let moodLine = '';
@@ -11839,7 +12042,7 @@ async function main() {
     st.wakeConfig.wakeCount = (st.wakeConfig.wakeCount || 0) + 1;
     st.lastWakeReason = reason;
     saveSocialV2State();
-    const promptText = buildWakePromptV2(key, reason);
+    const promptText = await buildWakePromptV2(key, reason);
     log(`[reserved2] 唤醒 ${key}（${reason}）`);
     const rollbackWakeTime = () => {
       const idx = st.wakeTimes.lastIndexOf(wakeTime);
