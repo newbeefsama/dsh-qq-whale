@@ -128,6 +128,15 @@ Copy-Item config.example.json 你的工作区\qq-bridge\config.json
 | `activeTopicMaxAgeHours` | `6` | **「进行中话题」的新鲜度上限**。超过就不当「正在聊」注入了 |
 | `activeTopicMaxAgeHighHours` | `72` | 重要度 ≥4（约定、欠账）放宽到的上限 |
 | `activeTopicInjectMax` | `10` | 每次最多注入几条进行中话题 |
+| `embedEnabled` | `true` | **用本地 ollama 向量检索替代 3 字片段字面匹配** |
+| `embedModel` | `bge-m3` | 需先 `ollama pull bge-m3`（1.2 GB）。没拉就自动退回字面匹配 |
+| `embedUrl` | `http://127.0.0.1:11434` | ollama 地址 |
+| `embedMinSim` | `0.60` | 相似度门槛。实测：该想起的 0.63~0.66，无关话题 ≤0.53 |
+
+> **为什么加 `embed*` 这几项：** 原来「被重新提起」是 3 字片段**字面**匹配。
+> 实测「碗我洗好了，你那份也别搁着」对「白饭票梗：我发的票盖碗印」是 **0 命中** ——
+> 语义完全相关，但一个字都对不上，它想不起来。改成向量检索后同一句命中 0.637。
+> ollama 不在/超时一律自动退回字面匹配，**不会报错**。
 
 
 > **为什么需要 `activeTopicMaxAgeHours`：** 只按权重排序时，权重半衰期是 14 天 ——
