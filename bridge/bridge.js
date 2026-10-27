@@ -800,7 +800,7 @@ function loadConfig() {
         embedUrl: 'http://127.0.0.1:11434',
         // 相似度门槛：0.60 是实测调的 —— bge-m3 下真正该想起的约 0.63~0.66，
         // 无关话题最高约 0.53。取中间值两边都有余量。
-        embedMinSim: 0.6
+        embedMinSim: 0.5
       },
       // ── 好友申请（本地改动 2026-10-26）──
       friend: {
@@ -1303,7 +1303,7 @@ function withTimeout(promise, ms, label) {
 // ── 合并转发自动展开（本地改动，2026-10-22）────────────────────────────
 // 问题：机器人从来没调用过 qq_get_forward_msg（实测 0 次），所以群里有人发
 // 「聊天记录合集」时，它只看到一句 `[转发消息 id=xxx]`，完全不知道里面是什么。
-// 慕泽 17:04 发了合并转发 + 专门 @ 它，它也没去查。
+// 群友H 17:04 发了合并转发 + 专门 @ 它，它也没去查。
 //
 // 做法：格式化消息时就顺手把转发内容抓下来，压成一行摘要塞进正文。
 // 这样它不用记得调工具，打开就是内容。
@@ -10058,7 +10058,7 @@ async function main() {
   const EMB_CACHE_FILE = path.join(STATE_DIR, 'emb-cache.json');
   // 0.60 是实测调的：bge-m3 下真正该想起的约 0.63~0.66，无关话题最高约 0.53，
   // 取中间值两边都留余量。
-  const EMB_DEFAULTS = { enabled: true, model: 'bge-m3', url: 'http://127.0.0.1:11434', minSim: 0.6 };
+  const EMB_DEFAULTS = { enabled: true, model: 'bge-m3', url: 'http://127.0.0.1:11434', minSim: 0.5 };
   let embCache = null;
   let embSaveTimer = null;
   let embFailUntil = 0;
@@ -10163,22 +10163,36 @@ async function main() {
   async function memorySimilarities(st, messages) {
     if (!st || !Array.isArray(st.activeTopics) || !st.activeTopics.length) return null;
     if (!messages?.length) return null;
-    const blob = messages
-      .map((m) => String(m?.text || m?.plain || ''))
-      .join('\n')
-      .replace(/\s+/g, ' ')
-      .trim()
-      .slice(0, 4000);
-    if (blob.length < 4) return null;
-    const blobVec = await embedText(blob);
-    if (!blobVec) return null;
+    // 2026-10-27 改：原来是**把最多 30 条消息拼成一个大 blob** 算一个向量。
+    // 实测那样会把语义稀释掉 —— 真实群聊里一段话同时混着拍一拍、表情、
+    // 好几个人插嘴，一句「提到那件事」的话被冲淡到 0.55 就再也过不了门槛。
+    // （对比：单独一句话「碗我洗好了」对白饭记忆能到 0.637。）
+    // 现在改成**逐条算、取最高分**：一条消息命中就够，不用整段都相关。
+    // 只取最近 MEM_SIM_MAX_MSGS 条，避免每次唤醒打十几次 HTTP。
+    const MEM_SIM_MAX_MSGS = 6;
+    const texts = messages
+      .slice(-MEM_SIM_MAX_MSGS)
+      .map((m) => String(m?.text || m?.plain || '').replace(/\s+/g, ' ').trim())
+      .filter((t) => t.length >= 2);
+    if (!texts.length) return null;
+    const msgVecs = [];
+    for (const t of texts) {
+      const v = await embedText(t.slice(0, 800));
+      if (v) msgVecs.push(v);
+    }
+    if (!msgVecs.length) return null;
     const out = new Map();
     for (const t of st.activeTopics) {
       const text = String(t?.text || '').trim();
       if (!text) continue;
       const vec = await embedText(text.slice(0, 1200));
       if (!vec) continue;
-      out.set(text, cosineSim(blobVec, vec));
+      let best = 0;
+      for (const mv of msgVecs) {
+        const sim = cosineSim(mv, vec);
+        if (sim > best) best = sim;
+      }
+      out.set(text, best);
     }
     return out.size ? out : null;
   }
@@ -10197,7 +10211,7 @@ async function main() {
     if (!st) return;
     const keep = memoryCfg().pruneWeight;
     if (Array.isArray(st.activeTopics)) {
-      st.activeTopics = st.activeTopics.filter((t) => t && t.text && memoryWeight(t, now) >= keep);
+      st.activeTopics = st.activeTopics.filter((t) => t && t.text && (t.permanent === true || memoryWeight(t, now) >= keep));
     }
     if (Array.isArray(st.pendingThoughts)) {
       st.pendingThoughts = st.pendingThoughts.filter((t) => t && (!t.expiresAt || now < Number(t.expiresAt)));
@@ -10280,6 +10294,10 @@ async function main() {
     // 新鲜度闸：超过 activeTopicMaxAgeHours 的话题不再算「进行中」
     // （重要度 ≥4 的放宽到 activeTopicMaxAgeHighHours）。状态不删，只不注入。
     const topics = allTopics.filter((t) => {
+      // 「长期事实」永远不沉默（2026-10-27 加）：约定、身份、画像这类东西
+      // 不该按 6 小时新鲜度算 —— 「明天五碗，明天验碗」过一夜就沉默是荒唐的。
+      // 由 AI 在记的时候自己标 permanent: true。
+      if (t && t.permanent === true) return true;
       const touched = Number(t.lastTouchedAt) || Number(t.lastMentionAt) || Number(t.createdAt) || 0;
       if (!touched) return true;
       const ageHours = (now - touched) / 3600e3;
@@ -10379,6 +10397,7 @@ async function main() {
         existing.lastTouchedAt = nowTs;
         existing.reinforced = (Number(existing.reinforced) || 0) + 1;
         existing.importance = Math.max(memoryImportance(existing), imp);
+        if (extra.permanent === true) existing.permanent = true;
         if (Array.isArray(extra.participants)) {
           const set = new Set([...(existing.participants || []), ...extra.participants.map((p) => redactKnownTokensOnly(String(p)))]);
           existing.participants = [...set].slice(0, 10);
@@ -10390,6 +10409,7 @@ async function main() {
           lastMentionAt: nowTs,
           lastTouchedAt: nowTs,
           importance: imp,
+          permanent: extra.permanent === true,   // 长期事实：不淡、不沉默、不被清
           reinforced: 0,
           participants: Array.isArray(extra.participants) ? extra.participants.map((p) => redactKnownTokensOnly(String(p))).slice(0, 10) : [],
           pendingQuestion: redactKnownTokensOnly(String(extra.pendingQuestion || '')).slice(0, 200)

@@ -286,7 +286,8 @@
       "reviveMinGrams": 2,
       "activeTopicMaxAgeHours": 6,
       "activeTopicMaxAgeHighHours": 72,
-      "activeTopicInjectMax": 10
+      "activeTopicInjectMax": 10,
+      "embedMinSim": 0.5
     },
     "qzone": {
       "enabled": true,

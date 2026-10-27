@@ -935,7 +935,7 @@ server.tool(
 
 server.tool(
   'qq_memory_append',
-  '记录一条轻量记忆：activeTopic=进行中的话题；pendingThought=你想说但还没说的话；memberImpression=对某位群友的印象。记忆会持久化，并在后续唤醒/qq_get_prompt 中自动出现。\n【会淡忘，不是硬盘】每条记忆按 extra.importance 决定忘得多慢（1=两天就淡，3=默认两周，5=三个月以上）。淡了不删除，只是越来越难被想起来；哪天又被提起会弹回来。所以别什么都记——只记还值得捡回来的事；也别怕记错重点，把真正重要的事标成 4 或 5。',
+  '记录一条轻量记忆：activeTopic=进行中的话题；pendingThought=你想说但还没说的话；memberImpression=对某位群友的印象。记忆会持久化，并在后续唤醒/qq_get_prompt 中自动出现。\n【长期事实（permanent）】约定、身份、画像这类东西传 extra.permanent=true —— 它们永远不淡、永远在上下文里、不会被清掉。普通聊天别标。\n【会淡忘，不是硬盘】每条记忆按 extra.importance 决定忘得多慢（1=两天就淡，3=默认两周，5=三个月以上）。淡了不删除，只是越来越难被想起来；哪天又被提起会弹回来。所以别什么都记——只记还值得捡回来的事；也别怕记错重点，把真正重要的事标成 4 或 5。',
   {
     key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
     token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
@@ -947,6 +947,7 @@ server.tool(
       pendingQuestion: z.string().optional().describe('activeTopic 里还没问出口的问题'),
       motivation: z.string().optional().describe('pendingThought 的动机，如 curiosity/sociability'),
       expiresAtMs: z.number().optional().describe('pendingThought 过期毫秒数，默认 2 小时'),
+      permanent: z.boolean().optional().describe('标成「长期事实」：永远不过期、永远会被想起、不会被清掉。用于**约定**（"明天端五碗饭"）、**身份关系**（谁是群主、谁是谁的谁）、**画像**（某人的长期喜好/禁忌）。普通聊天不要标 —— 标多了等于没有新鲜度闸。'),
       importance: z.number().int().min(1).max(5).optional().describe('重要度 1~5，决定忘得多慢。1=随口一句(2天)、2=(7天)、3=默认(14天)、4=挺重要(30天)、5=重要约定/底线(90天)')
     }).optional().describe('附加信息')
   },
